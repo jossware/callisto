@@ -1,6 +1,17 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": [
-    "config:recommended"
-  ]
+  "extends": ["config:recommended", ":dependencyDashboard"],
+  "timezone": "America/New_York",
+  "schedule": ["before 6am on monday"],
+  "prConcurrentLimit": 5,
+  "commitMessageAction": "update",
+  "pin": { "commitMessageAction": "pin" },
+  "pinDigest": { "commitMessageAction": "pin" },
+  "rollback": { "commitMessageAction": "roll back" },
+  "replacement": { "commitMessageAction": "replace" },
+  "nix": { "enabled": true },
+  "lockFileMaintenance": {
+    "enabled": true,
+    "commitMessageAction": "lock file maintenance"
+  }
 }
