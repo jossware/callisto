@@ -1,0 +1,12 @@
+---
+source: src/render/frontmatter.rs
+expression: out
+---
+status: open / beadStatus: open
+status: open / beadStatus: pinned
+status: open / beadStatus: blocked
+status: in-progress / beadStatus: in_progress
+status: in-progress / beadStatus: hooked
+status: someday-maybe / beadStatus: deferred
+status: done / beadStatus: closed
+status: open / beadStatus: review

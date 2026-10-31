@@ -1,0 +1,35 @@
+---
+source: src/render/frontmatter.rs
+expression: "render(\"ganymede-juj.12\", full_graph(), vec![])"
+---
+---
+type: task
+title: "point references at jossware/ganymede"
+status: done
+priority: high
+projects:
+  - "[[ganymede]]"
+bead: ganymede-juj.12
+beadPrefix: ganymede
+beadType: task
+beadStatus: closed
+beadPriority: 1
+beadLabels:
+  - "alpha"
+  - "has space"
+  - "zeta"
+parent: "[[make the repository public - ganymede-juj]]"
+blockedBy:
+  - uid: "[[pick a license - ganymede-juj.3]]"
+    reltype: FINISHTOSTART
+  - uid: "[[transfer the repository to jossware - ganymede-juj.11]]"
+    reltype: FINISHTOSTART
+dateCreated: 2026-10-10T22:21:06-04:00
+dateModified: 2026-10-10T22:21:40-04:00
+completedDate: 2026-10-11
+created: 2026-10-10
+aliases:
+  - ganymede-juj.12
+generatedBy: callisto
+obsidianUIMode: preview
+---

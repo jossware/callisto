@@ -1,0 +1,71 @@
+---
+source: src/render/body.rs
+expression: "note_of(\"g-1\", every_row_beads(), vec![], &[TASK_NOTE])"
+---
+---
+type: task
+title: "the bead"
+status: done
+priority: high
+projects:
+  - "[[ganymede]]"
+bead: g-1
+beadPrefix: g
+beadType: task
+beadStatus: closed
+beadPriority: 1
+parent: "[[the epic - g-e]]"
+blockedBy:
+  - uid: "[[blocker - g-2]]"
+    reltype: FINISHTOSTART
+dateCreated: 2026-10-10T22:21:06-04:00
+dateModified: 2026-10-10T22:21:40-04:00
+completedDate: 2026-10-12
+created: 2026-10-10
+aliases:
+  - g-1
+generatedBy: callisto
+obsidianUIMode: preview
+---
+
+> [!info] g-1 · task · P1 · closed
+> | | |
+> | --- | --- |
+> | Parent | [[the epic - g-e]] |
+> | Depends on | [[blocker - g-2]] |
+> | Blocks | [[t - g-3]] |
+> | Children | [[t - g-1.1]] |
+> | Discovered from | [[origin - g-4]] |
+> | Discovered | [[t - g-5]] |
+> | Superseded by | [[older - g-6]] |
+> | Assignee | ryane |
+> | Owner | ryan@example.com |
+> | Created by | Ryan |
+> | Started | 2026-10-10 23:00 |
+> | Close reason | Shipped in 0320dca. |
+> | Task note | [[the bead]] |
+
+## Description
+
+What to do.
+
+- one
+- two
+
+## Design
+
+### Plan
+
+#### Steps
+
+```rust
+fn main() {}
+```
+
+## Acceptance criteria
+
+Tests pass.
+
+## Notes
+
+Found `x` on the way.

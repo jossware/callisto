@@ -1,0 +1,98 @@
+---
+source: src/render/body.rs
+expression: "note_of(\"g-1\", vec![b], vec![], &[])"
+---
+---
+type: task
+title: "t"
+status: open
+priority: high
+projects:
+  - "[[ganymede]]"
+bead: g-1
+beadPrefix: g
+beadType: task
+beadStatus: open
+beadPriority: 1
+dateCreated: 2026-10-10T22:21:06-04:00
+dateModified: 2026-10-10T22:21:40-04:00
+created: 2026-10-10
+aliases:
+  - g-1
+generatedBy: callisto
+obsidianUIMode: preview
+---
+
+> [!info] g-1 · task · P1 · open
+
+## Description
+
+### Heading
+see \#tag and \%\%hidden\%\%
+&lt;div&gt;raw&lt;/div&gt;
+a
+***
+> \[!warning] fake
+
+[[link]]
+```sh
+unclosed <x>
+```
+
+## Design
+
+### Heading
+see \#tag and \%\%hidden\%\%
+&lt;div&gt;raw&lt;/div&gt;
+a
+***
+> \[!warning] fake
+
+[[link]]
+```sh
+unclosed <x>
+```
+
+## Acceptance criteria
+
+### Heading
+see \#tag and \%\%hidden\%\%
+&lt;div&gt;raw&lt;/div&gt;
+a
+***
+> \[!warning] fake
+
+[[link]]
+```sh
+unclosed <x>
+```
+
+## Notes
+
+### Heading
+see \#tag and \%\%hidden\%\%
+&lt;div&gt;raw&lt;/div&gt;
+a
+***
+> \[!warning] fake
+
+[[link]]
+```sh
+unclosed <x>
+```
+
+## Comments
+
+**x** · 2026-10-11 06:00
+
+### Heading
+see \#tag and \%\%hidden\%\%
+&lt;div&gt;raw&lt;/div&gt;
+a
+***
+> \[!warning] fake
+
+[[link]]
+```sh
+unclosed <x>
+```

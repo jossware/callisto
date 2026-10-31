@@ -1,0 +1,20 @@
+[package]
+name = "callisto"
+version = "0.1.0"
+edition = "2024"
+description = "Mirror beads issues into an Obsidian vault"
+repository = "https://github.com/jossware/callisto"
+license = "MIT"
+publish = false
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+jiff = { version = "0.2", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+toml = "1.1.8"
+
+[dev-dependencies]
+insta = "1.49.0"
+pulldown-cmark = { version = "0.13.4", default-features = false }

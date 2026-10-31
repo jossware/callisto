@@ -1,0 +1,24 @@
+---
+source: src/render/frontmatter.rs
+expression: "render(\"ganymede-x1\", vec![b], vec![])"
+---
+---
+type: task
+title: "a plain task"
+status: open
+priority: normal
+projects:
+  - "[[ganymede]]"
+bead: ganymede-x1
+beadPrefix: ganymede
+beadType: task
+beadStatus: open
+beadPriority: 2
+dateCreated: 2026-10-10T22:21:06-04:00
+dateModified: 2026-10-10T22:21:40-04:00
+created: 2026-10-10
+aliases:
+  - ganymede-x1
+generatedBy: callisto
+obsidianUIMode: preview
+---

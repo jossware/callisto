@@ -1,0 +1,89 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Bump to rotate the cache when the archive outgrows its budget.
+  NIX_CACHE_PREFIX: nix-v1-Linux-
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      nix-key: ${{ steps.nix-key.outputs.key }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # Ubuntu's AppArmor blocks the unprivileged user namespaces that
+      # single-user Nix needs for its sandbox.
+      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      - uses: nixbuild/nix-quick-install-action@v35
+        with:
+          # Without fallback = false, a runner that blocks user namespaces
+          # silently builds unsandboxed, and nix build stops proving isolation.
+          nix_conf: |
+            max-jobs = auto
+            sandbox = true
+            sandbox-fallback = false
+
+      - id: nix-key
+        env:
+          HASH: ${{ hashFiles('flake.nix', 'flake.lock', 'Cargo.lock') }}
+        run: echo "key=$NIX_CACHE_PREFIX$HASH" >> "$GITHUB_OUTPUT"
+
+      - uses: nix-community/cache-nix-action@v7
+        with:
+          primary-key: ${{ steps.nix-key.outputs.key }}
+          restore-prefixes-first-match: ${{ env.NIX_CACHE_PREFIX }}
+          # PR scopes are unreadable from main, so a PR save is pure cost.
+          save: ${{ github.ref == 'refs/heads/main' }}
+
+      # Swatinem/rust-cache probes cargo on PATH, which only nix develop provides.
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock', 'flake.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - run: nix develop -c cargo fmt --check
+      - run: nix develop -c cargo clippy --locked --all-targets -- -D warnings
+      - run: nix develop -c cargo test --locked
+      - run: nix build -L
+      - run: nix flake check -L
+
+  # A separate job so that PR runs, which execute untrusted build scripts
+  # and tests, never hold a token that can delete caches.
+  purge-nix-cache:
+    needs: check
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          KEEP: ${{ needs.check.outputs.nix-key }}
+        # Collect every page before deleting; deletion shifts later pages.
+        run: |
+          ids=$(gh api --paginate \
+            "repos/$GH_REPO/actions/caches?key=$NIX_CACHE_PREFIX&per_page=100" \
+            --jq '.actions_caches[] | select(.key != env.KEEP) | .id')
+          for id in $ids; do gh cache delete "$id"; done

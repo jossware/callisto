@@ -1,0 +1,33 @@
+---
+source: src/render/body.rs
+expression: "note_of(\"g-e\", vec![epic, done, open], vec![mol], &[])"
+---
+---
+type: task
+title: "build the thing"
+status: open
+priority: high
+projects:
+  - "[[ganymede]]"
+bead: g-e
+beadPrefix: g
+beadType: epic
+beadStatus: open
+beadPriority: 1
+dateCreated: 2026-10-10T22:21:06-04:00
+dateModified: 2026-10-10T22:21:40-04:00
+created: 2026-10-10
+aliases:
+  - g-e
+generatedBy: callisto
+obsidianUIMode: preview
+---
+
+> [!info] g-e · epic · P1 · open
+> | | |
+> | --- | --- |
+> | Children | 2 / 3 closed<br>[[second piece - g-e.2]]<br>[[first piece - g-e.1]]<br>✓ g-mol-1 |
+
+## Description
+
+Ship it in pieces.

@@ -1,0 +1,6 @@
+.superpowers/
+/target
+/result
+/.direnv
+/prompt.txt
+.claude/settings.local.json
