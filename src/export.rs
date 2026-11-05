@@ -154,6 +154,16 @@ mod tests {
     }
 
     #[test]
+    fn parses_scheduled_and_due_dates() {
+        let extra = r#","defer_until":"2026-11-07T05:00:00Z","due_at":"2026-11-10T14:00:00Z""#;
+        let b = &parse(&line(extra)).unwrap().beads[0];
+        assert_eq!(b.defer_until, Some("2026-11-07T05:00:00Z".parse().unwrap()));
+        assert_eq!(b.due_at, Some("2026-11-10T14:00:00Z".parse().unwrap()));
+        let b = &parse(&line("")).unwrap().beads[0];
+        assert_eq!((b.defer_until, b.due_at), (None, None));
+    }
+
+    #[test]
     fn accepts_custom_status_and_type() {
         let b = &parse(&line(r#","status":"review","issue_type":"incident""#))
             .unwrap()
@@ -237,6 +247,7 @@ mod tests {
     fn wrong_field_type_is_an_error() {
         assert!(parse(&line(r#","labels":"alpha""#)).is_err());
         assert!(parse(&line(r#","closed_at":"yesterday""#)).is_err());
+        assert!(parse(&line(r#","due_at":"soon""#)).is_err());
     }
 
     fn fake_export(dir: &std::path::Path, stdout: &str) -> Bd {

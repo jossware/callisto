@@ -4,6 +4,7 @@
 use std::collections::BTreeSet;
 
 use jiff::Timestamp;
+use jiff::civil::Time;
 use jiff::tz::TimeZone;
 
 use crate::bead::Bead;
@@ -28,7 +29,10 @@ pub fn frontmatter(bead: &Bead, cx: &Context) -> String {
 
     let mut out = String::from("---\ntype: task\n");
     out.push_str(&format!("title: {}\n", quote(&bead.title)));
-    out.push_str(&format!("status: {}\n", status(&bead.status)));
+    out.push_str(&format!(
+        "status: {}\n",
+        status(&bead.status, bead.defer_until.is_some())
+    ));
     out.push_str(&format!("priority: {}\n", priority(bead.priority)));
     if linkable(cx.project) {
         out.push_str(&format!(
@@ -72,6 +76,22 @@ pub fn frontmatter(bead: &Bead, cx: &Context) -> String {
         }
     }
 
+    // Local midnight is how a date with no time of day arrives, so it
+    // renders as a bare date.
+    let when = |at: Timestamp| {
+        let at = local(at);
+        if at.time() == Time::midnight() {
+            at.date().to_string()
+        } else {
+            at.strftime("%Y-%m-%dT%H:%M").to_string()
+        }
+    };
+    if let Some(at) = bead.defer_until.filter(|_| bead.status != "closed") {
+        out.push_str(&format!("scheduled: {}\n", when(at)));
+    }
+    if let Some(at) = bead.due_at {
+        out.push_str(&format!("due: {}\n", when(at)));
+    }
     let stamp = |at: Timestamp| local(at).strftime("%Y-%m-%dT%H:%M:%S%:z").to_string();
     out.push_str(&format!("dateCreated: {}\n", stamp(bead.created_at)));
     out.push_str(&format!("dateModified: {}\n", stamp(bead.updated_at)));
@@ -199,6 +219,78 @@ mod tests {
             out.push('\n');
         }
         insta::assert_snapshot!(out);
+    }
+
+    fn ts(s: &str) -> Option<Timestamp> {
+        Some(s.parse().unwrap())
+    }
+
+    #[test]
+    fn dates() {
+        let mut b = bead("g-1", "t");
+        b.status = "deferred".into();
+        b.defer_until = ts("2026-11-07T04:00:00Z");
+        b.due_at = ts("2026-11-10T13:30:45Z");
+        insta::assert_snapshot!(render("g-1", vec![b], vec![]));
+    }
+
+    #[test]
+    fn undated_deferral_is_someday_maybe() {
+        let mut b = bead("g-1", "t");
+        b.status = "deferred".into();
+        let block = render("g-1", vec![b], vec![]);
+        assert_eq!(line_of(&block, "status"), Some("status: someday-maybe"));
+        assert_eq!(line_of(&block, "scheduled"), None);
+        assert_eq!(line_of(&block, "due"), None);
+    }
+
+    #[test]
+    fn just_past_midnight_is_a_datetime() {
+        let mut b = bead("g-1", "t");
+        b.defer_until = ts("2026-11-07T04:00:01Z");
+        let block = render("g-1", vec![b], vec![]);
+        assert_eq!(
+            line_of(&block, "scheduled"),
+            Some("scheduled: 2026-11-07T00:00")
+        );
+    }
+
+    #[test]
+    fn scheduled_on_open_bead() {
+        let mut b = bead("g-1", "t");
+        b.defer_until = ts("2026-11-07T04:00:00Z");
+        let block = render("g-1", vec![b], vec![]);
+        assert_eq!(line_of(&block, "scheduled"), Some("scheduled: 2026-11-07"));
+        assert_eq!(line_of(&block, "status"), Some("status: open"));
+    }
+
+    #[test]
+    fn closed_drops_scheduled_keeps_due() {
+        let mut b = bead("g-1", "t");
+        b.status = "closed".into();
+        b.closed_at = ts("2026-10-11T15:00:00Z");
+        b.defer_until = ts("2026-11-07T04:00:00Z");
+        b.due_at = ts("2026-11-10T04:00:00Z");
+        let block = render("g-1", vec![b], vec![]);
+        assert_eq!(line_of(&block, "scheduled"), None);
+        assert_eq!(line_of(&block, "due"), Some("due: 2026-11-10"));
+    }
+
+    #[test]
+    fn cleared_dates_drop_fields() {
+        let mut b = bead("g-1", "t");
+        b.status = "deferred".into();
+        b.defer_until = ts("2026-11-07T04:00:00Z");
+        b.due_at = ts("2026-11-10T04:00:00Z");
+        let dated = render("g-1", vec![b.clone()], vec![]);
+        assert!(line_of(&dated, "scheduled").is_some() && line_of(&dated, "due").is_some());
+        b.status = "open".into();
+        b.defer_until = None;
+        b.due_at = None;
+        let cleared = render("g-1", vec![b], vec![]);
+        assert_eq!(line_of(&cleared, "scheduled"), None);
+        assert_eq!(line_of(&cleared, "due"), None);
+        assert_eq!(cleared, render("g-1", vec![bead("g-1", "t")], vec![]));
     }
 
     #[test]
