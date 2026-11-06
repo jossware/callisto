@@ -36,10 +36,12 @@ pub fn quote(value: &str) -> String {
 }
 
 /// TaskNotes status for a bead status. `blocked` stays `open`: the vault
-/// reserves `waiting` for tasks parked on the user.
-pub fn status(bead_status: &str) -> &'static str {
+/// reserves `waiting` for tasks parked on the user. A `dated` deferral
+/// is `open`: it resurfaces on its scheduled date, so it is not someday.
+pub fn status(bead_status: &str, dated: bool) -> &'static str {
     match bead_status {
         "in_progress" | "hooked" => "in-progress",
+        "deferred" if dated => "open",
         "deferred" => "someday-maybe",
         "closed" => "done",
         _ => "open",
@@ -101,8 +103,11 @@ mod tests {
             ("review", "open"),
             ("", "open"),
         ] {
-            assert_eq!(status(bead), want, "{bead}");
+            assert_eq!(status(bead, false), want, "{bead}");
         }
+        assert_eq!(status("deferred", true), "open");
+        assert_eq!(status("closed", true), "done");
+        assert_eq!(status("in_progress", true), "in-progress");
     }
 
     #[test]

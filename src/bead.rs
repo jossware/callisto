@@ -24,6 +24,10 @@ pub struct Bead {
     pub started_at: Option<Timestamp>,
     pub closed_at: Option<Timestamp>,
     #[serde(default)]
+    pub defer_until: Option<Timestamp>,
+    #[serde(default)]
+    pub due_at: Option<Timestamp>,
+    #[serde(default)]
     pub labels: Vec<String>,
     #[serde(default)]
     pub dependencies: Vec<Dependency>,
@@ -79,6 +83,8 @@ pub(crate) mod test_support {
             updated_at: "2026-10-11T02:21:40Z".parse().unwrap(),
             started_at: None,
             closed_at: None,
+            defer_until: None,
+            due_at: None,
             labels: vec![],
             dependencies: vec![],
             comments: vec![],
