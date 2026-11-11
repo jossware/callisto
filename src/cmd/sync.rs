@@ -10,6 +10,7 @@ use jiff::tz::TimeZone;
 use crate::bd::Bd;
 use crate::config::{self, Config, VaultError};
 use crate::errlog::{self, Entry, Stage};
+use crate::group::Groups;
 use crate::lock;
 use crate::paths::{self, Env};
 use crate::repo::{self, Repo};
@@ -137,23 +138,25 @@ fn sync(args: &Args, env: &Env, bd: &Bd, cwd: &Path, state: &Path, out: &mut Out
         Ok(lock) => lock,
         Err(e) => return out.fail(Stage::Lock, None, e),
     };
-    let mut repos = resolve(&targets, out);
-    if args.all {
-        // Before the scope, so prefixes are read from pulled data.
-        repos.retain(|repo| match bd.run(&repo.root, &["dolt", "pull"]) {
-            Ok(_) => true,
-            Err(e) => {
-                out.fail(Stage::Pull, Some(&repo.root), e);
-                false
-            }
-        });
-    }
+    let repos = resolve(&targets, out);
     if repos.is_empty() {
         return;
     }
-    let scope = sync::scope(bd, &config.paths());
+    let mut groups = Groups::derive(bd, &config.paths());
+    let pulled = if args.all {
+        // Before the prefixes, so they are read from pulled data.
+        let pulled = pull(bd, &groups, &repos, out);
+        if pulled.is_empty() {
+            return;
+        }
+        Some(pulled)
+    } else {
+        None
+    };
+    groups.read_prefixes(bd);
+    let scope = groups.scope();
     let tz = TimeZone::system();
-    for repo in &repos {
+    let sync_one = |repo: &Repo, out: &mut Out| {
         let req = Request {
             bd,
             vault: &vault,
@@ -164,6 +167,95 @@ fn sync(args: &Args, env: &Env, bd: &Bd, cwd: &Path, state: &Path, out: &mut Out
         match sync::sync_repo(&lock, &req) {
             Ok(report) => out.report(repo, &report),
             Err(e) => out.fail(e.stage(), Some(&repo.root), e),
+        }
+    };
+    if let Some(pulled) = pulled {
+        for repo in &pulled {
+            sync_one(repo, out);
+        }
+        return;
+    }
+    let mut synced: Vec<&Path> = Vec::new();
+    for target in &repos {
+        let repo = match groups.of_target(bd, target) {
+            Ok(Some(group)) => {
+                if synced.contains(&group.database.as_path()) {
+                    continue;
+                }
+                synced.push(&group.database);
+                group.representative(Some(target))
+            }
+            Ok(None) => target,
+            Err(e) => {
+                out.fail(Stage::Config, Some(&target.root), e);
+                continue;
+            }
+        };
+        sync_one(repo, out);
+    }
+}
+
+/// Reports the resolved repos `groups` could not place, then pulls each
+/// group once, in its first resolved member. Returns the repos to sync.
+fn pull(bd: &Bd, groups: &Groups, repos: &[Repo], out: &mut Out) -> Vec<Repo> {
+    let resolved = |root: &Path| repos.iter().any(|r| r.root == root);
+    let errored = |root: &Path| {
+        groups
+            .ungrouped
+            .iter()
+            .any(|u| u.error.is_some() && u.repo.as_ref().is_some_and(|r| r.root == root))
+    };
+    for ungrouped in &groups.ungrouped {
+        if let (Some(repo), Some(e)) = (&ungrouped.repo, &ungrouped.error)
+            && resolved(&repo.root)
+        {
+            out.fail(Stage::Config, Some(&repo.root), e);
+        }
+    }
+    let mut pulled = Vec::new();
+    let mut tried: Vec<&Path> = Vec::new();
+    for group in &groups.groups {
+        let Some(member) = group.members.iter().find(|m| resolved(&m.root)) else {
+            continue;
+        };
+        tried.push(&group.database);
+        if pull_in(bd, member, out) {
+            pulled.push(member.clone());
+        }
+    }
+    // Grouping locates configured paths without following symlinks, so a
+    // resolved repo can be one it never placed.
+    for repo in repos {
+        if groups.of_member(&repo.root).is_some() || errored(&repo.root) {
+            continue;
+        }
+        let synced = match groups.of_target(bd, repo) {
+            Ok(Some(group)) => {
+                if tried.contains(&group.database.as_path()) {
+                    continue;
+                }
+                tried.push(&group.database);
+                group.representative(Some(repo))
+            }
+            Ok(None) => repo,
+            Err(e) => {
+                out.fail(Stage::Config, Some(&repo.root), e);
+                continue;
+            }
+        };
+        if pull_in(bd, repo, out) {
+            pulled.push(synced.clone());
+        }
+    }
+    pulled
+}
+
+fn pull_in(bd: &Bd, repo: &Repo, out: &mut Out) -> bool {
+    match bd.run(&repo.root, &["dolt", "pull"]) {
+        Ok(_) => true,
+        Err(e) => {
+            out.fail(Stage::Pull, Some(&repo.root), e);
+            false
         }
     }
 }

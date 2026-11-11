@@ -16,6 +16,7 @@ use serde_json::Value;
 use crate::bd::Bd;
 use crate::config::{self, Config, VaultError};
 use crate::errlog::{self, Entry, Stage};
+use crate::group::Groups;
 use crate::lock;
 use crate::paths::{self, Env};
 use crate::repo;
@@ -98,17 +99,25 @@ pub fn run(vault: Option<&Path>, env: &Env, bd: &Bd, stdin: &mut dyn Read, err: 
         Err(lock::Error::Locked) => return,
         Err(e) => return fail(env, root, Stage::Lock, e.to_string(), err),
     };
-    let scope = sync::scope(bd, &config.paths());
+    let mut groups = Groups::derive(bd, &config.paths());
+    groups.read_prefixes(bd);
+    let synced = match groups.of_target(bd, &repo) {
+        Ok(Some(group)) => group.representative(Some(&repo)),
+        Ok(None) => &repo,
+        Err(e) => return fail(env, root, Stage::Config, e.to_string(), err),
+    };
+    *REPO.lock().unwrap_or_else(|e| e.into_inner()) = Some(synced.root.clone());
+    let scope = groups.scope();
     let req = Request {
         bd,
         vault: &vault,
-        repo: &repo,
+        repo: synced,
         scope: &scope,
         tz: &TimeZone::system(),
     };
     // Warnings are dropped: they recur every turn, and `sync` shows them.
     if let Err(e) = sync::sync_repo(&lock, &req) {
-        fail(env, root, e.stage(), e.to_string(), err);
+        fail(env, Some(&synced.root), e.stage(), e.to_string(), err);
     }
 }
 
