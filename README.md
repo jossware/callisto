@@ -202,8 +202,9 @@ exits non-zero. Other groups still sync.
 
 A checkout not in `repos` whose database a group uses syncs as that
 group. One whose database no group uses syncs alone, as a path entry
-would, with a warning that its prefix is unchecked. While any table entry is unresolvable, such a checkout syncs
-nothing, since its database may be that entry's.
+would, with a warning that its prefix is unchecked. While any table
+entry is unresolvable, such a checkout syncs nothing, since its
+database may be that entry's.
 
 ### Unclaimed beads
 
@@ -504,8 +505,9 @@ Standing conditions are problems that persist across runs: unclaimed
 beads, a missing project, a missing unfiled folder, an index path
 callisto did not write, an unresolvable entry, a broken group rule, an
 unlisted checkout skipped. `sync` prints them on every run. The log
-gets them once when they appear or change, and once when they clear. `conditions.json` beside the log keeps the last logged
-summary per subject, `0600`. Deleting it only re-logs current conditions.
+gets them once when they appear or change, and once when they clear.
+`conditions.json` beside the log keeps the last logged summary per
+subject, `0600`. Deleting it only re-logs current conditions.
 
 The same directory holds `sync.lock`. A sync holds it from before
 `bd dolt pull` until its last write, so a run that read stale beads
@@ -529,9 +531,8 @@ CI runs the same checks. `nix flake check` evaluates the home-manager
 module for every supported system and validates every platform's
 rendered units, so a Linux run checks the macOS plist too. It also
 loads the module's generated `config.toml` through callisto's config
-loader. Its
-`trace: warning: services.callisto…` lines come from the tests of that
-warning and are expected.
+loader. Its `trace: warning: services.callisto…` lines come from the
+tests of that warning and are expected.
 
 Renderer tests use [insta](https://insta.rs) snapshots. Review changes
 with `cargo insta review`.

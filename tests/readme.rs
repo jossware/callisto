@@ -21,14 +21,14 @@ fn readme() -> String {
     fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/README.md")).unwrap()
 }
 
-/// Every ```toml block that is a callisto config. A block with a table
-/// header, such as Codex's `[features]`, configures another program.
+/// Every ```toml block that is a callisto config. A `[features]`
+/// block is Codex's, which callisto does not read.
 fn config_blocks(text: &str) -> Vec<String> {
     let mut blocks = Vec::new();
     let mut lines = text.lines();
     while lines.by_ref().any(|l| l == "```toml") {
         let block: Vec<_> = lines.by_ref().take_while(|l| *l != "```").collect();
-        if !block.iter().any(|l| l.trim_start().starts_with('[')) {
+        if !block.iter().any(|l| l.trim() == "[features]") {
             blocks.push(block.join("\n"));
         }
     }

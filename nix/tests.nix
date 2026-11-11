@@ -335,15 +335,20 @@ let
         };
 
         test_warns_on_unused_field_or_unfiled = {
-          expr = map (settings: builtins.length (warned (with' ({ enable = true; } // settings) {
+          expr = map (settings: warned (with' ({ enable = true; } // settings) {
             xdg.configFile."callisto/config.toml".text = "";
-          }))) [
+          })) [
             { field = "f"; }
             { unfiled = "U"; }
+            { field = "f"; unfiled = "U"; }
           ];
           expected = [
-            1
-            1
+            [ "services.callisto.field is set, but neither vault nor repos is, so config.toml is not generated and it has no effect." ]
+            [ "services.callisto.unfiled is set, but neither vault nor repos is, so config.toml is not generated and it has no effect." ]
+            [
+              "services.callisto.field is set, but neither vault nor repos is, so config.toml is not generated and it has no effect."
+              "services.callisto.unfiled is set, but neither vault nor repos is, so config.toml is not generated and it has no effect."
+            ]
           ];
         };
       };

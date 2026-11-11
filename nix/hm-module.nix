@@ -17,14 +17,14 @@ let
     message = "services.callisto.${option}: ${p} MUST be absolute or start with ~/";
   };
 
-  nonEmptyStr = lib.types.strMatching ".+";
+  nonEmpty = lib.types.strMatching ".+";
 
   entryPath = e: if lib.isString e then e else e.path;
 
   # Mirrors the loader: every dot-separated segment is non-empty.
-  fieldAssertion = option: f: {
+  fieldAssertion = option: label: f: {
     assertion = !(builtins.elem "" (lib.splitString "." f));
-    message = "services.callisto.${option}: ${f} MUST be a dotted path with no empty segments";
+    message = "services.callisto.${option}: ${label} ${f} MUST be a dotted path with no empty segments";
   };
 
   unfiledAssertion = u: {
@@ -47,7 +47,7 @@ let
           message = "services.callisto.repos: ${p} MUST set field, or set services.callisto.field";
         }
       ]
-      ++ lib.optional (e.field != null) (fieldAssertion "repos" e.field)
+      ++ lib.optional (e.field != null) (fieldAssertion "repos" "${p}: field" e.field)
     );
 
   renderRepo =
@@ -101,7 +101,7 @@ in
                 description = "Repo checkout. MUST be absolute or start with `~/`.";
               };
               value = lib.mkOption {
-                type = lib.types.nullOr (lib.types.either nonEmptyStr (lib.types.nonEmptyListOf nonEmptyStr));
+                type = lib.types.nullOr (lib.types.either nonEmpty (lib.types.nonEmptyListOf nonEmpty));
                 default = null;
                 description = ''
                   Value or values matched against the field on each bead.
@@ -119,7 +119,7 @@ in
                 '';
               };
               project = lib.mkOption {
-                type = lib.types.nullOr nonEmptyStr;
+                type = lib.types.nullOr nonEmpty;
                 default = null;
                 description = ''
                   Project name for the repo. callisto defaults it to the
@@ -159,8 +159,10 @@ in
       default = null;
       example = "Inbox/Beads";
       description = ''
-        Vault-relative directory for beads that match no repo. callisto
-        defaults it to `Inbox`.
+        Vault-relative folder for the index note of unclaimed beads,
+        `Unfiled beads - <prefix>.md`. Unclaimed beads get no note of
+        their own. callisto never creates the folder, and a sync fails
+        if it is missing. callisto defaults it to `Inbox`.
       '';
     };
 
@@ -205,7 +207,7 @@ in
         assertions =
           lib.optional (cfg.vault != null) (entryAssertion "vault" cfg.vault)
           ++ lib.concatMap repoAssertions cfg.repos
-          ++ lib.optional (cfg.field != null) (fieldAssertion "field" cfg.field)
+          ++ lib.optional (cfg.field != null) (fieldAssertion "field" "value" cfg.field)
           ++ lib.optional (cfg.unfiled != null) (unfiledAssertion cfg.unfiled);
 
         # sync --all fails without a vault or with an empty repo list, so
@@ -213,8 +215,11 @@ in
         # home-manager does not manage may still supply either, hence
         # warnings and not assertions.
         warnings =
-          lib.optional ((cfg.field != null || cfg.unfiled != null) && !generates)
-            "services.callisto: field and unfiled are set, but neither vault nor repos is, so config.toml is not generated and they have no effect."
+          lib.optionals (!generates) (
+            map
+              (name: "services.callisto.${name} is set, but neither vault nor repos is, so config.toml is not generated and it has no effect.")
+              (lib.filter (name: cfg.${name} != null) [ "field" "unfiled" ])
+          )
           ++ (if cfg.repos != [ ] then
             lib.optional (cfg.vault == null)
               "services.callisto.vault is unset, so every scheduled `callisto sync --all` fails. Set services.callisto.vault."
