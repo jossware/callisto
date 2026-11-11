@@ -225,6 +225,127 @@ let
           expr = rejected { vault = "org"; };
           expected = true;
         };
+
+        test_table_entries_accepted =
+          let
+            configured = enabled {
+              field = "metadata.repo";
+              unfiled = "Inbox/Beads";
+              repos = [
+                "/srv/b"
+                {
+                  path = "~/work/p";
+                  value = "github.com/o/p";
+                  project = "P";
+                }
+                {
+                  path = "/srv/q";
+                  field = "x.y";
+                  value = [
+                    "a"
+                    "b"
+                  ];
+                }
+              ];
+            };
+          in
+          {
+            expr = {
+              file = configured.xdg.configFile ? "callisto/config.toml";
+              failed = failed configured;
+            };
+            expected = {
+              file = true;
+              failed = [ ];
+            };
+          };
+
+        test_relative_table_path_fails_assertion = {
+          expr = rejected {
+            field = "f";
+            repos = [ { path = "work/p"; } ];
+          };
+          expected = true;
+        };
+
+        test_table_without_field_fails_assertion = {
+          expr = [
+            (rejected { repos = [ { path = "/srv/p"; } ]; })
+            (rejected {
+              repos = [
+                {
+                  path = "/srv/p";
+                  field = "f";
+                }
+              ];
+            })
+          ];
+          expected = [
+            true
+            false
+          ];
+        };
+
+        test_bad_field_fails_assertion = {
+          expr = map rejected [
+            {
+              field = "metadata.";
+              repos = [ { path = "/p"; } ];
+            }
+            {
+              repos = [
+                {
+                  path = "/p";
+                  field = ".repo";
+                }
+              ];
+            }
+            { field = "a..b"; }
+          ];
+          expected = [
+            true
+            true
+            true
+          ];
+        };
+
+        test_bad_unfiled_fails_assertion = {
+          expr = map (u: rejected { unfiled = u; }) [
+            "/abs"
+            "Inbox/"
+            "a/../b"
+            "./a"
+            ""
+            "a//b"
+          ];
+          expected = [
+            true
+            true
+            true
+            true
+            true
+            true
+          ];
+        };
+
+        # The loader reads a leading ~ as an ordinary directory name.
+        test_tilde_unfiled_is_relative = {
+          expr = rejected { unfiled = "~/x"; };
+          expected = false;
+        };
+
+        test_warns_on_unused_field_or_unfiled = {
+          expr = map (settings: builtins.length (warned (with' ({ enable = true; } // settings) {
+            xdg.configFile."callisto/config.toml".text = "";
+          }))) [
+            { field = "f"; }
+            { unfiled = "U"; }
+          ];
+          expected = [
+            1
+            1
+          ];
+        };
       };
 
       darwinTests = {
