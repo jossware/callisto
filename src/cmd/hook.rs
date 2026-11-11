@@ -100,7 +100,7 @@ pub fn run(vault: Option<&Path>, env: &Env, bd: &Bd, stdin: &mut dyn Read, err: 
         Err(lock::Error::Locked) => return,
         Err(e) => return fail(env, root, Stage::Lock, e.to_string(), err),
     };
-    let mut groups = Groups::derive(bd, &config.paths());
+    let mut groups = Groups::derive(bd, &config.repos);
     groups.read_prefixes(bd);
     let mut summaries = vec![standing::config_summary()];
     let (synced, subject) = match groups.of_target(bd, &repo) {

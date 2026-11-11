@@ -143,7 +143,7 @@ fn sync(args: &Args, env: &Env, bd: &Bd, cwd: &Path, state: &Path, out: &mut Out
     if repos.is_empty() {
         return;
     }
-    let mut groups = Groups::derive(bd, &config.paths());
+    let mut groups = Groups::derive(bd, &config.repos);
     let mut summaries = vec![standing::config_summary()];
     let pulled = if args.all {
         // Before the prefixes, so they are read from pulled data.
