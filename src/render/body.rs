@@ -286,7 +286,11 @@ mod tests {
         }
         let index = Index::scan(dir.path()).unwrap();
         let links = Links::new(&index, Default::default());
-        let graph = Graph::new(Export { beads, scaffolding });
+        let graph = Graph::new(Export {
+            beads,
+            scaffolding,
+            ..Default::default()
+        });
         let tz = TimeZone::fixed(Offset::constant(-4));
         let cx = Context {
             graph: &graph,
