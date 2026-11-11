@@ -17,15 +17,22 @@ pub fn normalize(url: &str) -> Option<String> {
             }
             let (authority, path) = rest.split_once('/')?;
             let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
-            let host = host.split_once(':').map_or(host, |(h, _)| h);
+            let (host, port) = split_host(host)?;
+            if !port.is_empty() && !port.starts_with(':') {
+                return None;
+            }
             (host, path)
         }
         None => {
-            let (host, path) = url.split_once(':')?;
+            let rest = match url.split_once('@') {
+                Some((user, rest)) if !user.contains([':', '/']) => rest,
+                _ => url,
+            };
+            let (host, path) = split_host(rest)?;
+            let path = path.strip_prefix(':')?;
             if host.contains('/') {
                 return None;
             }
-            let host = host.rsplit_once('@').map_or(host, |(_, h)| h);
             // One letter is a Windows drive, not a host.
             if host.len() == 1 && host.as_bytes()[0].is_ascii_alphabetic() {
                 return None;
@@ -39,6 +46,22 @@ pub fn normalize(url: &str) -> Option<String> {
         return None;
     }
     Some(format!("{}/{path}", host.to_ascii_lowercase()))
+}
+
+/// Splits `host[:rest]` at the end of the host. An IPv6 literal keeps
+/// its brackets, since its colons are not a port separator.
+fn split_host(text: &str) -> Option<(&str, &str)> {
+    if text.starts_with('[') {
+        let end = text.find(']')?;
+        if end == 1 {
+            return None;
+        }
+        return Some(text.split_at(end + 1));
+    }
+    Some(match text.find(':') {
+        Some(i) => text.split_at(i),
+        None => (text, ""),
+    })
 }
 
 /// The git CLI, used only to read a checkout's origin remote.
@@ -148,6 +171,9 @@ mod tests {
             ("http://host:8080/a/b", "host/a/b"),
             ("work-alias:o/p.git", "work-alias/o/p"),
             ("  https://h/o/p\n", "h/o/p"),
+            ("ssh://git@[2001:DB8::1]/o/p.git", "[2001:db8::1]/o/p"),
+            ("ssh://git@[2001:db8::1]:2222/o/p", "[2001:db8::1]/o/p"),
+            ("git@[2001:db8::1]:o/p.git", "[2001:db8::1]/o/p"),
         ] {
             assert_eq!(normalize(url).as_deref(), Some(want), "{url}");
         }
@@ -165,6 +191,9 @@ mod tests {
             "ftp://h/o/p",
             "host:",
             "c:\\p",
+            "ssh://[2001:db8::1/o/p",
+            "ssh://[]/o/p",
+            "[2001:db8::1]o/p",
         ] {
             assert_eq!(normalize(url), None, "{url}");
         }
