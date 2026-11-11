@@ -98,7 +98,7 @@ pub fn run(vault: Option<&Path>, env: &Env, bd: &Bd, stdin: &mut dyn Read, err: 
         Err(lock::Error::Locked) => return,
         Err(e) => return fail(env, root, Stage::Lock, e.to_string(), err),
     };
-    let scope = sync::scope(bd, &config.repos);
+    let scope = sync::scope(bd, &config.paths());
     let req = Request {
         bd,
         vault: &vault,

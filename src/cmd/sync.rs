@@ -127,7 +127,7 @@ fn sync(args: &Args, env: &Env, bd: &Bd, cwd: &Path, state: &Path, out: &mut Out
             let error = format!("sync --all: no repos configured in {}", config_file());
             return out.fail(Stage::Config, None, error);
         }
-        config.repos.clone()
+        config.paths()
     } else if args.repos.is_empty() {
         vec![cwd.to_path_buf()]
     } else {
@@ -151,7 +151,7 @@ fn sync(args: &Args, env: &Env, bd: &Bd, cwd: &Path, state: &Path, out: &mut Out
     if repos.is_empty() {
         return;
     }
-    let scope = sync::scope(bd, &config.repos);
+    let scope = sync::scope(bd, &config.paths());
     let tz = TimeZone::system();
     for repo in &repos {
         let req = Request {
