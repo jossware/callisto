@@ -165,6 +165,8 @@ fn sync(args: &Args, env: &Env, bd: &Bd, cwd: &Path, state: &Path, out: &mut Out
             repo,
             scope: &scope,
             tz: &tz,
+            claims: None,
+            degraded: false,
         };
         match sync::sync_repo(&lock, &req) {
             Ok(mut report) => {

@@ -1,5 +1,6 @@
 pub mod bd;
 pub mod bead;
+pub mod claim;
 pub mod cli;
 pub mod cmd;
 pub mod config;
