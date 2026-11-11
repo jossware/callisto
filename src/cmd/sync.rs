@@ -10,10 +10,11 @@ use jiff::tz::TimeZone;
 use crate::bd::Bd;
 use crate::config::{self, Config, VaultError};
 use crate::errlog::{self, Entry, Stage};
-use crate::group::Groups;
-use crate::lock;
+use crate::group::{Group, Groups};
+use crate::lock::{self, Lock};
 use crate::paths::{self, Env};
 use crate::repo::{self, Repo};
+use crate::standing::{self, Condition, Subject, Summary};
 use crate::sync::{self, Report, Request};
 
 pub struct Args<'a> {
@@ -143,11 +144,15 @@ fn sync(args: &Args, env: &Env, bd: &Bd, cwd: &Path, state: &Path, out: &mut Out
         return;
     }
     let mut groups = Groups::derive(bd, &config.paths());
+    let mut summaries = vec![Summary {
+        subject: Subject::Config,
+        conditions: Vec::new(),
+    }];
     let pulled = if args.all {
         // Before the prefixes, so they are read from pulled data.
         let pulled = pull(bd, &groups, &repos, out);
         if pulled.is_empty() {
-            return;
+            return finish(&lock, state, &summaries, out);
         }
         Some(pulled)
     } else {
@@ -156,7 +161,7 @@ fn sync(args: &Args, env: &Env, bd: &Bd, cwd: &Path, state: &Path, out: &mut Out
     groups.read_prefixes(bd);
     let scope = groups.scope();
     let tz = TimeZone::system();
-    let sync_one = |repo: &Repo, out: &mut Out| {
+    let sync_one = |repo: &Repo, out: &mut Out| -> Option<Vec<Condition>> {
         let req = Request {
             bd,
             vault: &vault,
@@ -165,33 +170,78 @@ fn sync(args: &Args, env: &Env, bd: &Bd, cwd: &Path, state: &Path, out: &mut Out
             tz: &tz,
         };
         match sync::sync_repo(&lock, &req) {
-            Ok(report) => out.report(repo, &report),
-            Err(e) => out.fail(e.stage(), Some(&repo.root), e),
+            Ok(mut report) => {
+                out.report(repo, &report);
+                Some(std::mem::take(&mut report.conditions))
+            }
+            Err(e) => {
+                out.fail(e.stage(), Some(&repo.root), e);
+                None
+            }
         }
     };
     if let Some(pulled) = pulled {
         for repo in &pulled {
-            sync_one(repo, out);
+            if let Some(conditions) = sync_one(repo, out) {
+                let subject = match groups.of_member(&repo.root) {
+                    Some(group) => group_subject(group),
+                    None => Subject::Checkout(repo.root.clone()),
+                };
+                summaries.push(Summary {
+                    subject,
+                    conditions,
+                });
+            }
         }
-        return;
+        return finish(&lock, state, &summaries, out);
     }
     let mut synced: Vec<&Path> = Vec::new();
     for target in &repos {
-        let repo = match groups.of_target(bd, target) {
+        let (repo, subject) = match groups.of_target(bd, target) {
             Ok(Some(group)) => {
                 if synced.contains(&group.database.as_path()) {
                     continue;
                 }
                 synced.push(&group.database);
-                group.representative(Some(target))
+                (group.representative(Some(target)), group_subject(group))
             }
-            Ok(None) => target,
+            Ok(None) => (target, Subject::Checkout(target.root.clone())),
             Err(e) => {
                 out.fail(Stage::Config, Some(&target.root), e);
                 continue;
             }
         };
-        sync_one(repo, out);
+        if let Some(conditions) = sync_one(repo, out) {
+            summaries.push(Summary {
+                subject,
+                conditions,
+            });
+        }
+    }
+    finish(&lock, state, &summaries, out);
+}
+
+fn group_subject(group: &Group) -> Subject {
+    Subject::Group {
+        database: group.database.clone(),
+        repo: group.members[0].root.clone(),
+    }
+}
+
+/// Prints and records the run's summaries while the caller still holds
+/// the lock.
+fn finish(lock: &Lock, state: &Path, summaries: &[Summary], out: &mut Out) {
+    for summary in summaries.iter().filter(|s| !s.conditions.is_empty()) {
+        let _ = writeln!(
+            out.err,
+            "callisto: {}: {}",
+            summary.subject.label(),
+            summary.text()
+        );
+    }
+    standing::record(lock, state, "sync", summaries);
+    if standing::any_fails(summaries) {
+        out.failed = true;
     }
 }
 
