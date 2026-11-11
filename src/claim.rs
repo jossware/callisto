@@ -13,8 +13,10 @@ use crate::standing::Condition;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reason {
     NoField,
-    /// The value found, or compact JSON when it is not a string.
+    /// The string value found.
     Value(String),
+    /// Compact JSON of a value that is not a string.
+    Json(String),
     /// The claiming entry's project is not in the vault.
     MissingProject(String),
 }
@@ -32,7 +34,7 @@ pub struct Unclaimed {
 pub fn claimant<'c>(value: &FieldValue, claims: &'c [Claim]) -> Result<&'c Claim, Reason> {
     let found = match value {
         FieldValue::Absent => return Err(Reason::NoField),
-        FieldValue::Other(json) => return Err(Reason::Value(json.clone())),
+        FieldValue::Other(json) => return Err(Reason::Json(json.clone())),
         FieldValue::String(found) => found,
     };
     claims
@@ -99,7 +101,7 @@ pub fn conditions(unclaimed: &[Unclaimed]) -> Vec<Condition> {
                     None => missing.push((project.clone(), vec![u.id.clone()])),
                 }
             }
-            Reason::NoField | Reason::Value(_) => ids.push(u.id.clone()),
+            Reason::NoField | Reason::Value(_) | Reason::Json(_) => ids.push(u.id.clone()),
         }
     }
     let mut out = Vec::new();
@@ -149,7 +151,7 @@ mod tests {
         );
         assert_eq!(
             claimant(&FieldValue::Other("[\"o/a\"]".into()), &claims).unwrap_err(),
-            Reason::Value("[\"o/a\"]".into())
+            Reason::Json("[\"o/a\"]".into())
         );
     }
 }

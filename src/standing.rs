@@ -210,7 +210,7 @@ fn runs(s: &str) -> Vec<&str> {
     out
 }
 
-fn natural_cmp(a: &str, b: &str) -> Ordering {
+pub(crate) fn natural_cmp(a: &str, b: &str) -> Ordering {
     let (ra, rb) = (runs(a), runs(b));
     for (x, y) in ra.iter().zip(&rb) {
         let is_digits = |r: &str| r.starts_with(|c: char| c.is_ascii_digit());

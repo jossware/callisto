@@ -889,10 +889,7 @@ fn non_string_field_is_unclaimed() {
     let reasons: Vec<&Reason> = report.unclaimed.iter().map(|u| &u.reason).collect();
     assert_eq!(
         reasons,
-        [
-            &Reason::Value("7".into()),
-            &Reason::Value("[\"o/a\"]".into())
-        ]
+        [&Reason::Json("7".into()), &Reason::Json("[\"o/a\"]".into())]
     );
     assert_eq!(
         report.conditions,

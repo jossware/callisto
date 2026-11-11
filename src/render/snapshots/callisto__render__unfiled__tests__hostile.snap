@@ -1,0 +1,16 @@
+---
+source: src/render/unfiled.rs
+expression: "index(\"zz\", &field(), &[b])"
+---
+---
+generatedBy: callisto
+beadPrefix: zz
+obsidianUIMode: preview
+---
+
+> [!info] Beads no repo claims · zz
+> callisto rewrites this note on every sync. Edits are lost.
+
+| Bead | Title | Status | Reason |
+| --- | --- | --- | --- |
+| zz-1 | a \| b \[\[c\]\] \`d\` next | open | no metadata.repo |
