@@ -5,6 +5,7 @@ pub mod cmd;
 pub mod config;
 pub mod errlog;
 pub mod export;
+pub mod field_path;
 pub mod fields;
 pub mod filename;
 pub mod graph;
