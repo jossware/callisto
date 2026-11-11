@@ -1,5 +1,12 @@
 use std::cmp::Ordering;
+use std::collections::BTreeMap;
+use std::fs;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+
+use crate::errlog::{self, Entry, Stage};
+use crate::lock::Lock;
+use crate::paths;
 
 const SHOWN_IDS: usize = 3;
 
@@ -204,6 +211,60 @@ fn natural_cmp(a: &str, b: &str) -> Ordering {
     ra.len().cmp(&rb.len()).then_with(|| a.cmp(b))
 }
 
+/// Logs each summary that differs from the last one logged for its
+/// subject. Holding the sync lock keeps the state file single-writer.
+pub fn record(_lock: &Lock, state: &Path, command: &str, summaries: &[Summary]) {
+    record_to(state, command, summaries, &mut io::stderr());
+}
+
+fn record_to(state: &Path, command: &str, summaries: &[Summary], stderr: &mut dyn Write) {
+    let mut last = read_state(state);
+    let mut changed = false;
+    for summary in summaries {
+        let key = summary.subject.key();
+        let text = summary.text();
+        let logged = if summary.conditions.is_empty() {
+            last.remove(&key).is_some()
+        } else if last.get(&key) != Some(&text) {
+            last.insert(key, text.clone());
+            true
+        } else {
+            false
+        };
+        if logged {
+            let mut entry = Entry::new(Stage::Conditions, text);
+            entry.command = Some(command.to_string());
+            entry.repo = summary.subject.repo().map(Path::to_path_buf);
+            errlog::record(&paths::error_log(state), &entry);
+            changed = true;
+        }
+    }
+    if changed && let Err(e) = write_state(state, &last) {
+        // `eprintln!` panics on a closed stderr.
+        let _ = writeln!(
+            stderr,
+            "callisto: couldn't write {}: {e}",
+            paths::conditions_state(state).display()
+        );
+    }
+}
+
+fn read_state(state: &Path) -> BTreeMap<String, String> {
+    fs::read(paths::conditions_state(state))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+fn write_state(state: &Path, map: &BTreeMap<String, String>) -> io::Result<()> {
+    fs::create_dir_all(state)?;
+    let mut tmp = tempfile::NamedTempFile::new_in(state)?;
+    tmp.write_all(&serde_json::to_vec(map)?)?;
+    tmp.persist(paths::conditions_state(state))
+        .map_err(|e| e.error)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -386,5 +447,173 @@ mod tests {
         let c = Subject::Checkout(PathBuf::from("/c"));
         assert_eq!(c.key(), "checkout:/c");
         assert_eq!(c.label(), "/c");
+    }
+
+    use std::collections::BTreeMap;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    use tempfile::TempDir;
+
+    use crate::{errlog, lock, paths};
+
+    fn group(repo: &str, v: &[&str]) -> Summary {
+        Summary {
+            subject: Subject::Group {
+                database: "/db".into(),
+                repo: repo.into(),
+            },
+            conditions: if v.is_empty() {
+                vec![]
+            } else {
+                vec![unclaimed(v)]
+            },
+        }
+    }
+
+    struct Fixture {
+        tmp: TempDir,
+    }
+
+    impl Fixture {
+        fn new() -> Fixture {
+            Fixture {
+                tmp: tempfile::tempdir().unwrap(),
+            }
+        }
+
+        fn state(&self) -> &Path {
+            self.tmp.path()
+        }
+
+        fn record(&self, summaries: &[Summary]) -> String {
+            let _lock = lock::acquire(&paths::sync_lock(self.state())).unwrap();
+            let mut err = Vec::new();
+            record_to(self.state(), "sync", summaries, &mut err);
+            String::from_utf8(err).unwrap()
+        }
+
+        fn entries(&self) -> Vec<errlog::Entry> {
+            match fs::read_to_string(paths::error_log(self.state())) {
+                Ok(t) => t
+                    .lines()
+                    .map(|l| serde_json::from_str(l).unwrap())
+                    .collect(),
+                Err(_) => vec![],
+            }
+        }
+
+        fn saved(&self) -> BTreeMap<String, String> {
+            let t = fs::read_to_string(paths::conditions_state(self.state())).unwrap();
+            serde_json::from_str(&t).unwrap()
+        }
+    }
+
+    #[test]
+    fn first_summary_logs_and_saves() {
+        let f = Fixture::new();
+        let s = group("/r", &["a-1"]);
+        assert_eq!(f.record(std::slice::from_ref(&s)), "");
+        let entries = f.entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].command.as_deref(), Some("sync"));
+        assert_eq!(entries[0].repo.as_deref(), Some(Path::new("/r")));
+        assert_eq!(entries[0].stage, errlog::Stage::Conditions);
+        assert_eq!(entries[0].error, s.text());
+        assert_eq!(f.saved(), BTreeMap::from([(s.subject.key(), s.text())]));
+        let mode = fs::metadata(paths::conditions_state(f.state()))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn same_summary_logs_once() {
+        let f = Fixture::new();
+        let s = [group("/r", &["a-1"])];
+        f.record(&s);
+        let before = fs::read(paths::conditions_state(f.state())).unwrap();
+        f.record(&s);
+        assert_eq!(f.entries().len(), 1);
+        assert_eq!(
+            fs::read(paths::conditions_state(f.state())).unwrap(),
+            before
+        );
+    }
+
+    #[test]
+    fn changed_summary_logs_again() {
+        let f = Fixture::new();
+        f.record(&[group("/r", &["a-1"])]);
+        f.record(&[group("/r", &["a-2"])]);
+        assert_eq!(f.entries().len(), 2);
+    }
+
+    #[test]
+    fn cleared_subject_logs_once_and_drops_key() {
+        let f = Fixture::new();
+        f.record(&[group("/r", &["a-1"])]);
+        f.record(&[group("/r", &[])]);
+        let entries = f.entries();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[1].error, "standing conditions cleared");
+        assert_eq!(entries[1].repo.as_deref(), Some(Path::new("/r")));
+        assert!(f.saved().is_empty());
+        f.record(&[group("/r", &[])]);
+        assert_eq!(f.entries().len(), 2);
+    }
+
+    #[test]
+    fn empty_without_state_writes_nothing() {
+        let f = Fixture::new();
+        f.record(&[group("/r", &[])]);
+        assert!(!paths::conditions_state(f.state()).exists());
+        assert!(!paths::error_log(f.state()).exists());
+    }
+
+    #[test]
+    fn record_keeps_subjects_not_passed() {
+        let f = Fixture::new();
+        let a = group("/a", &["a-1"]);
+        let seed = format!("{{\"{}\":\"old\",\"other\":\"kept\"}}", a.subject.key());
+        fs::write(paths::conditions_state(f.state()), seed).unwrap();
+        f.record(std::slice::from_ref(&a));
+        let saved = f.saved();
+        assert_eq!(saved["other"], "kept");
+        assert_eq!(saved[&a.subject.key()], a.text());
+    }
+
+    #[test]
+    fn record_treats_corrupt_state_as_empty() {
+        let f = Fixture::new();
+        fs::write(paths::conditions_state(f.state()), "not json").unwrap();
+        let s = group("/r", &["a-1"]);
+        f.record(std::slice::from_ref(&s));
+        assert_eq!(f.entries().len(), 1);
+        assert_eq!(f.saved(), BTreeMap::from([(s.subject.key(), s.text())]));
+    }
+
+    #[test]
+    fn record_treats_wrong_shape_as_empty() {
+        for seed in ["[1]", "{\"k\":1}"] {
+            let f = Fixture::new();
+            fs::write(paths::conditions_state(f.state()), seed).unwrap();
+            let s = group("/r", &["a-1"]);
+            f.record(std::slice::from_ref(&s));
+            assert_eq!(f.entries().len(), 1, "{seed}");
+            assert_eq!(f.saved(), BTreeMap::from([(s.subject.key(), s.text())]));
+        }
+    }
+
+    #[test]
+    fn unwritable_state_goes_to_stderr() {
+        let f = Fixture::new();
+        let target = paths::conditions_state(f.state());
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("x"), "x").unwrap();
+        let err = f.record(&[group("/r", &["a-1"])]);
+        assert!(err.starts_with("callisto: couldn't write "), "{err}");
+        assert_eq!(f.entries().len(), 1);
     }
 }
