@@ -1128,6 +1128,20 @@ fn other_prefix_index_is_taken() {
 }
 
 #[test]
+fn non_utf8_index_is_taken() {
+    let f = table();
+    let bytes = b"---\ngeneratedBy: callisto\nbeadPrefix: zz\n---\n\xff\n";
+    fs::write(f.vault.join(INDEX), bytes).unwrap();
+    let report = index_run(&f);
+    assert_eq!(fs::read(f.vault.join(INDEX)).unwrap(), bytes);
+    assert!(
+        has_condition(&report, &Condition::IndexTaken { path: INDEX.into() }),
+        "{:?}",
+        report.conditions
+    );
+}
+
+#[test]
 fn symlinked_index_is_taken() {
     let f = table();
     put(&f.vault, "Inbox/real.md", VALID_INDEX);
@@ -1153,6 +1167,30 @@ fn degraded_writes_no_index() {
     f.set_export(&[field_line("zz-3", "three", "open", None)]);
     let report = f.run_claims(&a_and_b(), true).unwrap();
     assert!(!f.vault.join(INDEX).exists());
+    assert!(
+        !report.conditions.iter().any(|c| matches!(
+            c,
+            Condition::UnfiledMissing { .. } | Condition::IndexTaken { .. }
+        )),
+        "{:?}",
+        report.conditions
+    );
+}
+
+#[test]
+fn degraded_keeps_existing_index() {
+    let f = table();
+    f.set_export(&[field_line("zz-3", "three", "open", None)]);
+    f.run_claims(&a_and_b(), false).unwrap();
+    assert!(f.read(INDEX).contains("zz-3"));
+    f.set_export(&[field_line("zz-3", "three", "open", REPO_A)]);
+    let before = f.snapshot();
+    let report = f.run_claims(&a_and_b(), true).unwrap();
+    assert_eq!(
+        f.snapshot().get(Path::new(INDEX)),
+        before.get(Path::new(INDEX))
+    );
+    assert!(before.contains_key(Path::new(INDEX)));
     assert!(
         !report.conditions.iter().any(|c| matches!(
             c,

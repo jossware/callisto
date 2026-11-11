@@ -217,11 +217,16 @@ fn walk(
 
 /// Whether `path` is the unfiled index callisto wrote for `prefix`. A
 /// symlink is never one: rewriting it would write through to its target.
+/// Neither is a file that is not valid UTF-8: replacing it would lose
+/// bytes callisto cannot have written.
 pub fn own_index(path: &Path, prefix: &str) -> io::Result<bool> {
     if !fs::symlink_metadata(path)?.is_file() {
         return Ok(false);
     }
-    let found = fields::read(&head(path)?);
+    let Ok(text) = String::from_utf8(fs::read(path)?) else {
+        return Ok(false);
+    };
+    let found = fields::read(&text);
     Ok(found.generated_by.as_deref() == Some(MARKER_VALUE)
         && found.beads.is_empty()
         && found.bead_prefix.as_deref() == Some(prefix))
@@ -514,6 +519,18 @@ mod tests {
         assert!(!own(root, "unmarked.md"));
         assert!(!own(root, "bead.md"));
         assert!(!own(root, "other.md"));
+    }
+
+    #[test]
+    fn own_index_is_never_non_utf8() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(
+            root.join("bad.md"),
+            b"---\ngeneratedBy: callisto\nbeadPrefix: zz\n---\n\xff\n",
+        )
+        .unwrap();
+        assert!(!own(root, "bad.md"));
     }
 
     #[test]
