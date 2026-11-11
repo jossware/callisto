@@ -43,7 +43,6 @@ impl Condition {
         }
     }
 
-    // Within a variant: path or project first, then the remaining fields.
     fn order_key(&self) -> OrderKey {
         let rank = self.rank();
         let none = String::new;
@@ -198,11 +197,13 @@ fn runs(s: &str) -> Vec<&str> {
 fn natural_cmp(a: &str, b: &str) -> Ordering {
     let (ra, rb) = (runs(a), runs(b));
     for (x, y) in ra.iter().zip(&rb) {
-        let both_digits = x.starts_with(|c: char| c.is_ascii_digit())
-            && y.starts_with(|c: char| c.is_ascii_digit());
-        let ord = match (both_digits, x.parse::<u64>(), y.parse::<u64>()) {
-            (true, Ok(m), Ok(n)) => m.cmp(&n),
-            _ => x.cmp(y),
+        let is_digits = |r: &str| r.starts_with(|c: char| c.is_ascii_digit());
+        let ord = if is_digits(x) && is_digits(y) {
+            // Unparsed, so a run of any length keeps the order total.
+            let (x, y) = (x.trim_start_matches('0'), y.trim_start_matches('0'));
+            x.len().cmp(&y.len()).then_with(|| x.cmp(y))
+        } else {
+            x.cmp(y)
         };
         if ord != Ordering::Equal {
             return ord;
@@ -355,6 +356,23 @@ mod tests {
             text(unclaimed(&["w-10", "w-2", "w-3.10", "w-3.2"])),
             "4 unclaimed beads (w-2, w-3.2, w-3.10, …)"
         );
+    }
+
+    #[test]
+    fn ids_sort_past_leading_zeros() {
+        assert_eq!(
+            text(unclaimed(&["w-2", "w-1", "w-01"])),
+            "3 unclaimed beads (w-01, w-1, w-2)"
+        );
+    }
+
+    #[test]
+    fn ids_sort_totally_past_u64() {
+        let big = format!("x{}", "1000".repeat(5) + "0");
+        let mut v = vec![big.clone(), "x10".to_string(), "x2".to_string()];
+        v.sort_by(|a, b| natural_cmp(a, b));
+        assert_eq!(v, ["x2", "x10", big.as_str()]);
+        assert_eq!(natural_cmp(&big, "x2"), Ordering::Greater);
     }
 
     #[test]
