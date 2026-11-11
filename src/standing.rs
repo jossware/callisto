@@ -159,12 +159,11 @@ impl Summary {
     }
 }
 
-/// The config has no standing conditions yet. Its summary is still
-/// recorded so a stale entry clears.
-pub fn config_summary() -> Summary {
+/// Recorded even when `conditions` is empty, so a stale entry clears.
+pub fn config_summary(conditions: Vec<Condition>) -> Summary {
     Summary {
         subject: Subject::Config,
-        conditions: Vec::new(),
+        conditions,
     }
 }
 

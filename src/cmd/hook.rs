@@ -14,11 +14,13 @@ use jiff::tz::TimeZone;
 use serde_json::Value;
 
 use crate::bd::Bd;
+use crate::cmd::sync::{Plan, plan};
 use crate::config::{self, Config, VaultError};
 use crate::errlog::{self, Entry, Stage};
 use crate::group::Groups;
 use crate::lock;
 use crate::paths::{self, Env};
+use crate::remote::Git;
 use crate::repo;
 use crate::standing::{self, Subject, Summary};
 use crate::sync::{self, Request};
@@ -102,12 +104,28 @@ pub fn run(vault: Option<&Path>, env: &Env, bd: &Bd, stdin: &mut dyn Read, err: 
     };
     let mut groups = Groups::derive(bd, &config.repos);
     groups.read_prefixes(bd);
-    let mut summaries = vec![standing::config_summary()];
-    let (synced, subject) = match groups.of_target(bd, &repo) {
-        Ok(Some(group)) => (group.representative(Some(&repo)), Subject::group(group)),
-        Ok(None) => (&repo, Subject::Checkout(repo.root.clone())),
+    groups.resolve(&Git::default());
+    let mut summaries = vec![standing::config_summary(groups.conditions())];
+    let (synced, group) = match groups.of_target(bd, &repo) {
+        Ok(Some(group)) => (group.representative(Some(&repo)), Some(group)),
+        Ok(None) => (&repo, None),
         Err(e) => {
             fail(env, root, Stage::Config, e.to_string(), err);
+            standing::record(&lock, state, "hook", &summaries);
+            return;
+        }
+    };
+    let subject = match group {
+        Some(group) => Subject::group(group),
+        None => Subject::Checkout(repo.root.clone()),
+    };
+    let (claims, degraded) = match plan(&groups, group, group.is_some()) {
+        Plan::Sync { claims, degraded } => (claims, degraded),
+        Plan::Skip(condition) => {
+            summaries.push(Summary {
+                subject,
+                conditions: vec![condition],
+            });
             standing::record(&lock, state, "hook", &summaries);
             return;
         }
@@ -120,8 +138,8 @@ pub fn run(vault: Option<&Path>, env: &Env, bd: &Bd, stdin: &mut dyn Read, err: 
         repo: synced,
         scope: &scope,
         tz: &TimeZone::system(),
-        claims: None,
-        degraded: false,
+        claims,
+        degraded,
     };
     // Warnings are dropped: they recur every turn, and `sync` shows them.
     match sync::sync_repo(&lock, &req) {
