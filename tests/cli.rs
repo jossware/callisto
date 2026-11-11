@@ -1119,6 +1119,7 @@ fn conditions(sb: &Sandbox) -> Vec<Value> {
 
 /// Checkouts `a` (prefix `w`) and `b`, sharing `a`'s database, whose
 /// export holds `w-1` for `o/a`, `w-2` for `o/b` and `w-3` for neither.
+/// The vault has the default unfiled folder.
 fn rollout(sb: &Sandbox, a: &str, b: &str) {
     sb.repo("a", "w", &[]);
     sb.repo("b", "w", &[]);
@@ -1131,6 +1132,7 @@ fn rollout(sb: &Sandbox, a: &str, b: &str) {
             meta_line("w-3", "third", None),
         ],
     );
+    fs::create_dir_all(sb.vault().join("Inbox")).unwrap();
 }
 
 #[test]
@@ -1377,6 +1379,7 @@ fn degraded_table_group_skips_removal() {
         sb.toml_path("b")
     ));
     sb.export("a", &[meta_line("w-9", "old", Some("o/a"))]);
+    fs::create_dir_all(sb.vault().join("Inbox")).unwrap();
     let repos = sb.path("repos");
     sb.run(&repos, &["sync", "a"]);
     let old = sb.vault().join("Projects/a/old - w-9.md");

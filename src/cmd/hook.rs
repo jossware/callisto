@@ -140,6 +140,7 @@ pub fn run(vault: Option<&Path>, env: &Env, bd: &Bd, stdin: &mut dyn Read, err: 
         tz: &TimeZone::system(),
         claims,
         degraded,
+        unfiled: &config.unfiled,
     };
     // Warnings are dropped: they recur every turn, and `sync` shows them.
     match sync::sync_repo(&lock, &req) {

@@ -191,6 +191,7 @@ fn sync(args: &Args, env: &Env, bd: &Bd, cwd: &Path, state: &Path, out: &mut Out
             tz: &tz,
             claims,
             degraded,
+            unfiled: &config.unfiled,
         };
         match sync::sync_repo(&lock, &req) {
             Ok(report) => {
