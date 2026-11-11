@@ -128,7 +128,7 @@ fn sync(args: &Args, env: &Env, bd: &Bd, cwd: &Path, state: &Path, out: &mut Out
             let error = format!("sync --all: no repos configured in {}", config_file());
             return out.fail(Stage::Config, None, error);
         }
-        config.repos.clone()
+        config.paths()
     } else if args.repos.is_empty() {
         vec![cwd.to_path_buf()]
     } else {
@@ -142,7 +142,7 @@ fn sync(args: &Args, env: &Env, bd: &Bd, cwd: &Path, state: &Path, out: &mut Out
     if repos.is_empty() {
         return;
     }
-    let mut groups = Groups::derive(bd, &config.repos);
+    let mut groups = Groups::derive(bd, &config.paths());
     let pulled = if args.all {
         // Before the prefixes, so they are read from pulled data.
         let pulled = pull(bd, &groups, &repos, out);

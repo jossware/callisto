@@ -99,7 +99,7 @@ pub fn run(vault: Option<&Path>, env: &Env, bd: &Bd, stdin: &mut dyn Read, err: 
         Err(lock::Error::Locked) => return,
         Err(e) => return fail(env, root, Stage::Lock, e.to_string(), err),
     };
-    let mut groups = Groups::derive(bd, &config.repos);
+    let mut groups = Groups::derive(bd, &config.paths());
     groups.read_prefixes(bd);
     let synced = match groups.of_target(bd, &repo) {
         Ok(Some(group)) => group.representative(Some(&repo)),

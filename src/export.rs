@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
 use std::path::Path;
@@ -7,6 +8,7 @@ use serde_json::Value;
 
 use crate::bd::{Bd, BdError};
 use crate::bead::Bead;
+use crate::field_path::{FieldPath, FieldValue};
 
 /// bd scaffolding types that never become notes. Templates, wisps, and
 /// memories are recognised by their flags and `_type` instead, so a repo's
@@ -55,6 +57,10 @@ pub struct Export {
     /// Never rendered, but their rows still name parents and children of
     /// beads that are.
     pub scaffolding: Vec<Bead>,
+    /// Bead id to the requested field's value, for each bead in `beads`.
+    /// Empty when no field was requested. Scaffolding has none: it never
+    /// becomes a note, so nothing reads its value.
+    pub fields: HashMap<String, FieldValue>,
 }
 
 /// Parses `bd export` JSONL, keeping export order.
@@ -62,6 +68,11 @@ pub struct Export {
 /// Unknown fields are ignored: the export carries fields its schema does not
 /// list, and bd adds more over time.
 pub fn parse(jsonl: &str) -> Result<Export, ParseError> {
+    parse_with_field(jsonl, None)
+}
+
+/// Like [`parse`], also resolving `field` on every bead that gets a note.
+pub fn parse_with_field(jsonl: &str, field: Option<&FieldPath>) -> Result<Export, ParseError> {
     let mut export = Export::default();
     for (i, text) in jsonl.lines().enumerate() {
         if text.trim().is_empty() {
@@ -80,10 +91,14 @@ pub fn parse(jsonl: &str) -> Result<Export, ParseError> {
         {
             continue;
         }
+        let resolved = field.map(|path| path.resolve(&value));
         let record = Record::deserialize(value).map_err(err)?;
         if is_scaffolding(&record) {
             export.scaffolding.push(record.bead);
         } else {
+            if let Some(resolved) = resolved {
+                export.fields.insert(record.bead.id.clone(), resolved);
+            }
             export.beads.push(record.bead);
         }
     }
@@ -129,8 +144,17 @@ impl From<ParseError> for ExportError {
 /// Exports every bead in the repo at `checkout`. Any failure means the
 /// export is not authoritative and the repo's sync MUST stop.
 pub fn export(bd: &Bd, checkout: &Path) -> Result<Export, ExportError> {
+    export_with_field(bd, checkout, None)
+}
+
+/// Like [`export`], also resolving `field` on every bead that gets a note.
+pub fn export_with_field(
+    bd: &Bd,
+    checkout: &Path,
+    field: Option<&FieldPath>,
+) -> Result<Export, ExportError> {
     let jsonl = bd.run(checkout, &["export"])?;
-    Ok(parse(&jsonl)?)
+    Ok(parse_with_field(&jsonl, field)?)
 }
 
 #[cfg(test)]
@@ -291,5 +315,59 @@ mod tests {
         assert_eq!(b.dependencies[0].depends_on_id, "x-0");
         assert_eq!(b.dependencies[0].kind, "parent-child");
         assert_eq!(b.comments[0].text, "hi\nthere");
+    }
+
+    fn two_lines(first: &str) -> String {
+        format!("{}\n{}", line(first), line("").replace("x-1", "x-2"))
+    }
+
+    fn repo_path() -> FieldPath {
+        "metadata.repo".parse().unwrap()
+    }
+
+    #[test]
+    fn field_values_are_recorded_per_bead() {
+        let text = two_lines(r#","metadata":{"repo":"github.com/o/p"}"#);
+        let export = parse_with_field(&text, Some(&repo_path())).unwrap();
+        assert_eq!(
+            export.fields["x-1"],
+            FieldValue::String("github.com/o/p".into())
+        );
+        assert_eq!(export.fields["x-2"], FieldValue::Absent);
+        assert_eq!(export.fields.len(), 2);
+    }
+
+    #[test]
+    fn non_string_field_keeps_the_bead() {
+        let export =
+            parse_with_field(&line(r#","metadata":{"repo":42}"#), Some(&repo_path())).unwrap();
+        assert_eq!(export.beads.len(), 1);
+        assert_eq!(export.fields["x-1"], FieldValue::Other("42".into()));
+    }
+
+    #[test]
+    fn scaffolding_gets_no_field_value() {
+        let extra = r#","issue_type":"molecule","metadata":{"repo":"r"}"#;
+        let export = parse_with_field(&line(extra), Some(&repo_path())).unwrap();
+        assert_eq!(export.scaffolding.len(), 1);
+        assert!(export.fields.is_empty());
+    }
+
+    #[test]
+    fn no_field_means_no_values() {
+        let text = two_lines(r#","metadata":{"repo":"r"}"#);
+        let plain = parse_with_field(&text, None).unwrap();
+        assert!(plain.fields.is_empty());
+        assert_eq!(plain, parse(&text).unwrap());
+        let with = parse_with_field(&text, Some(&repo_path())).unwrap();
+        assert_eq!(with.beads, parse(&text).unwrap().beads);
+    }
+
+    #[test]
+    fn export_with_field_resolves() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bd = fake_export(tmp.path(), &line(r#","metadata":{"repo":"r"}"#));
+        let export = export_with_field(&bd, tmp.path(), Some(&repo_path())).unwrap();
+        assert_eq!(export.fields["x-1"], FieldValue::String("r".into()));
     }
 }
