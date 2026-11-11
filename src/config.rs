@@ -4,12 +4,14 @@ use std::error::Error;
 use std::fmt;
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use serde::de::value::MapAccessDeserializer;
 use serde::{Deserialize, Deserializer, de};
 
 use crate::paths::expand_tilde;
+
+const DEFAULT_UNFILED: &str = "Inbox";
 
 /// Paths are expanded and absolute.
 #[derive(Debug, PartialEq)]
@@ -26,7 +28,7 @@ impl Default for Config {
             vault: None,
             repos: Vec::new(),
             field: None,
-            unfiled: PathBuf::from("Inbox"),
+            unfiled: PathBuf::from(DEFAULT_UNFILED),
         }
     }
 }
@@ -157,6 +159,11 @@ pub enum ConfigError {
         path: PathBuf,
         entry: PathBuf,
     },
+    Invalid {
+        path: PathBuf,
+        key: String,
+        reason: String,
+    },
 }
 
 impl fmt::Display for ConfigError {
@@ -176,6 +183,9 @@ impl fmt::Display for ConfigError {
                 path.display(),
                 entry.display()
             ),
+            ConfigError::Invalid { path, key, reason } => {
+                write!(f, "{}: {key}: {reason}", path.display())
+            }
             ConfigError::NoField { path, entry } => write!(
                 f,
                 "{}: {}: no field set: set field on the entry or at the top level",
@@ -193,7 +203,8 @@ impl Error for ConfigError {
             ConfigError::Parse { source, .. } => Some(source),
             ConfigError::NoHome { .. }
             | ConfigError::Relative { .. }
-            | ConfigError::NoField { .. } => None,
+            | ConfigError::NoField { .. }
+            | ConfigError::Invalid { .. } => None,
         }
     }
 }
@@ -233,8 +244,20 @@ impl Config {
             }),
             Some(p) => Ok(p),
         };
+        let invalid = |key: &str, reason: &str| ConfigError::Invalid {
+            path: file.to_path_buf(),
+            key: key.to_owned(),
+            reason: reason.to_owned(),
+        };
+        if let Some(field) = &raw.field {
+            check_field(field).map_err(|r| invalid("field", r))?;
+        }
+        let unfiled = raw
+            .unfiled
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_UNFILED));
+        check_unfiled(&unfiled).map_err(|r| invalid("unfiled", r))?;
         let mut repos = Vec::with_capacity(raw.repos.len());
-        for entry in raw.repos {
+        for (i, entry) in raw.repos.into_iter().enumerate() {
             repos.push(match entry {
                 RawEntry::Path(path) => RepoEntry::Path(resolve(path)?),
                 RawEntry::Table(table) => {
@@ -245,6 +268,16 @@ impl Config {
                             entry: path.clone(),
                         }
                     })?;
+                    let key = |name: &str| format!("repos[{i}].{name}");
+                    check_field(&field).map_err(|r| invalid(&key("field"), r))?;
+                    if let Some(value) = &table.value
+                        && (value.0.is_empty() || value.0.iter().any(String::is_empty))
+                    {
+                        return Err(invalid(&key("value"), "must be non-empty strings"));
+                    }
+                    if table.project.as_deref() == Some("") {
+                        return Err(invalid(&key("project"), "must not be empty"));
+                    }
                     RepoEntry::Table(TableEntry {
                         path,
                         field,
@@ -258,13 +291,29 @@ impl Config {
             vault: raw.vault.map(&resolve).transpose()?,
             repos,
             field: raw.field,
-            unfiled: raw.unfiled.unwrap_or_else(|| PathBuf::from("Inbox")),
+            unfiled,
         })
     }
 
     pub fn paths(&self) -> Vec<PathBuf> {
         self.repos.iter().map(|r| r.path().to_path_buf()).collect()
     }
+}
+
+fn check_field(field: &str) -> Result<(), &'static str> {
+    if field.split('.').any(str::is_empty) {
+        return Err("must be a dotted path with no empty segments");
+    }
+    Ok(())
+}
+
+// Relative to the vault root, so it must not escape or depend on the cwd.
+fn check_unfiled(unfiled: &Path) -> Result<(), &'static str> {
+    let mut components = unfiled.components().peekable();
+    if components.peek().is_none() || !components.all(|c| matches!(c, Component::Normal(_))) {
+        return Err("must be a relative path inside the vault");
+    }
+    Ok(())
 }
 
 #[derive(Debug, PartialEq)]
@@ -465,6 +514,61 @@ repos = [
         assert_eq!(Config::default().unfiled, Path::new("Inbox"));
         let (_, config) = load_text("", home());
         assert_eq!(config.unwrap().unfiled, Path::new("Inbox"));
+    }
+
+    fn invalid_key(text: &str) -> String {
+        match load_text(text, home()).1 {
+            Err(ConfigError::Invalid { key, .. }) => key,
+            other => panic!("expected Invalid for {text:?}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bad_field_is_an_error() {
+        for bad in ["", "a..b", ".a", "a."] {
+            assert_eq!(invalid_key(&format!("field = \"{bad}\"")), "field");
+            let text = format!("repos = [{{ path = \"/b\", field = \"{bad}\" }}]");
+            assert_eq!(invalid_key(&text), "repos[0].field");
+        }
+    }
+
+    #[test]
+    fn empty_value_is_an_error() {
+        for bad in [r#""""#, "[]", r#"["a", ""]"#] {
+            let text = format!("field = \"f\"\nrepos = [{{ path = \"/b\", value = {bad} }}]");
+            assert_eq!(invalid_key(&text), "repos[0].value");
+        }
+    }
+
+    #[test]
+    fn empty_project_is_an_error() {
+        let text = "field = \"f\"\nrepos = [{ path = \"/b\", project = \"\" }]";
+        assert_eq!(invalid_key(text), "repos[0].project");
+    }
+
+    #[test]
+    fn bad_unfiled_is_an_error() {
+        for bad in ["", "/abs", "../x", "a/../b", "./a"] {
+            assert_eq!(invalid_key(&format!("unfiled = \"{bad}\"")), "unfiled");
+        }
+    }
+
+    #[test]
+    fn nested_unfiled_is_kept() {
+        for ok in ["Inbox/beads", "~/x"] {
+            let (_, config) = load_text(&format!("unfiled = \"{ok}\""), home());
+            assert_eq!(config.unwrap().unfiled, Path::new(ok));
+        }
+    }
+
+    #[test]
+    fn invalid_display_names_file_and_key() {
+        let (file, config) = load_text(r#"field = "a..b""#, home());
+        let text = config.unwrap_err().to_string();
+        assert!(
+            text.starts_with(&format!("{}: field: ", file.display())),
+            "{text}"
+        );
     }
 
     #[test]
