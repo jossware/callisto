@@ -1271,6 +1271,58 @@ fn hook_in_broken_group_logs_once() {
 }
 
 #[test]
+fn hook_in_table_group_files_claims() {
+    let sb = Sandbox::new();
+    rollout(&sb, "o/a", "o/b");
+    sb.config_text(&format!(
+        "field = \"metadata.repo\"\nrepos = [{{ path = {}, value = \"o/a\" }}, {{ path = {}, value = \"o/b\" }}]\n",
+        sb.toml_path("a"),
+        sb.toml_path("b")
+    ));
+    for _ in 0..2 {
+        let out = sb.hook(&payload(&sb.path("repos/b")), &[], &[]);
+        assert_quiet_exit(&out);
+    }
+    assert!(sb.note("Projects/a/first - w-1.md"), "{:?}", sb.log());
+    assert!(sb.note("Projects/b/second - w-2.md"), "{:?}", sb.log());
+    let named: Vec<_> = files(&sb.vault())
+        .into_iter()
+        .filter(|f| f.to_string_lossy().contains("w-3"))
+        .collect();
+    assert!(named.is_empty(), "{named:?}");
+    let logged = conditions(&sb);
+    assert_eq!(logged.len(), 1, "{:?}", sb.log());
+    let error = logged[0]["error"].as_str().unwrap();
+    assert!(error.contains("1 unclaimed bead (w-3)"), "{error}");
+}
+
+#[test]
+fn hook_in_unlisted_checkout_skipped_while_degraded() {
+    let sb = Sandbox::new();
+    sb.repo("a", "a", &[("a-1", "first")]);
+    let c = sb.repo("c", "c", &[("c-1", "third")]);
+    sb.config_text(&format!(
+        "field = \"metadata.repo\"\nrepos = [{{ path = {} }}]\n",
+        sb.toml_path("a")
+    ));
+    for _ in 0..2 {
+        let out = sb.hook(&payload(&c), &[], &[]);
+        assert_quiet_exit(&out);
+    }
+    assert!(!sb.note("Projects/c/third - c-1.md"));
+    let skipped: Vec<_> = conditions(&sb)
+        .into_iter()
+        .filter(|e| {
+            e["error"]
+                .as_str()
+                .unwrap()
+                .contains("not in repos and a table entry is unresolvable; nothing synced")
+        })
+        .collect();
+    assert_eq!(skipped.len(), 1, "{:?}", sb.log());
+}
+
+#[test]
 fn unlisted_checkout_skipped_while_degraded() {
     let sb = Sandbox::new();
     sb.repo("a", "a", &[("a-1", "first")]);

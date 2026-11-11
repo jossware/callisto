@@ -264,8 +264,9 @@ impl Groups {
                 let prefixless = |(g, _): (usize, usize)| self.groups[g].prefix.is_none();
                 match entry {
                     RepoEntry::Path(_) => placed.is_none_or(prefixless),
-                    // Reported as unresolvable rather than as an incomplete
-                    // scope.
+                    // Only a failed prefix read could let this run claim
+                    // another group's notes. An unplaced entry is reported
+                    // as unresolvable instead.
                     RepoEntry::Table(_) => placed.is_some_and(prefixless),
                 }
             })

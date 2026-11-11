@@ -103,6 +103,11 @@ impl Git {
             .env_remove("GIT_WORK_TREE")
             .env_remove("GIT_COMMON_DIR")
             .stdin(Stdio::null());
+        // `-C` still searches parents; a jj-only checkout inside another
+        // git repo would otherwise report the outer repo's origin.
+        if let Some(parent) = checkout.parent() {
+            command.env("GIT_CEILING_DIRECTORIES", parent);
+        }
         command
     }
 
@@ -211,7 +216,7 @@ mod tests {
 
     #[test]
     fn origin_clears_git_env() {
-        let command = Git::default().command(Path::new("."));
+        let command = Git::default().command(Path::new("/srv/p"));
         let removed: Vec<_> = command
             .get_envs()
             .filter(|(_, value)| value.is_none())
@@ -220,5 +225,10 @@ mod tests {
         for key in ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"] {
             assert!(removed.contains(&key.into()), "{key} in {removed:?}");
         }
+        let ceiling = command
+            .get_envs()
+            .find(|(key, _)| *key == "GIT_CEILING_DIRECTORIES")
+            .and_then(|(_, value)| value);
+        assert_eq!(ceiling, Some(Path::new("/srv").as_os_str()));
     }
 }
