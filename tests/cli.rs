@@ -1017,3 +1017,22 @@ fn unlisted_checkout_writes_no_state() {
     assert_quiet_exit(&hook);
     assert_no_standing_state(&sb);
 }
+
+#[test]
+fn hook_context_failure_still_records_config() {
+    let sb = Sandbox::new();
+    sb.repo("a", "a", &[("a-1", "first")]);
+    let c = sb.repo("c", "c", &[("c-1", "third")]);
+    sb.flag("c", "context-fails");
+    sb.config(&["a"]);
+    fs::create_dir_all(sb.path("state/callisto")).unwrap();
+    fs::write(
+        sb.path("state/callisto/conditions.json"),
+        r#"{"config":"old"}"#,
+    )
+    .unwrap();
+    let out = sb.hook(&payload(&c), &[], &[]);
+    assert_quiet_exit(&out);
+    let stages: Vec<_> = sb.log().iter().map(|e| e["stage"].clone()).collect();
+    assert_eq!(stages, ["config", "conditions"], "{stages:?}");
+}

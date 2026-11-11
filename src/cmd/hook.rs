@@ -102,6 +102,10 @@ pub fn run(vault: Option<&Path>, env: &Env, bd: &Bd, stdin: &mut dyn Read, err: 
     };
     let mut groups = Groups::derive(bd, &config.paths());
     groups.read_prefixes(bd);
+    let mut summaries = vec![Summary {
+        subject: Subject::Config,
+        conditions: Vec::new(),
+    }];
     let (synced, subject) = match groups.of_target(bd, &repo) {
         Ok(Some(group)) => (
             group.representative(Some(&repo)),
@@ -111,7 +115,11 @@ pub fn run(vault: Option<&Path>, env: &Env, bd: &Bd, stdin: &mut dyn Read, err: 
             },
         ),
         Ok(None) => (&repo, Subject::Checkout(repo.root.clone())),
-        Err(e) => return fail(env, root, Stage::Config, e.to_string(), err),
+        Err(e) => {
+            fail(env, root, Stage::Config, e.to_string(), err);
+            standing::record(&lock, state, "hook", &summaries);
+            return;
+        }
     };
     *REPO.lock().unwrap_or_else(|e| e.into_inner()) = Some(synced.root.clone());
     let scope = groups.scope();
@@ -123,10 +131,6 @@ pub fn run(vault: Option<&Path>, env: &Env, bd: &Bd, stdin: &mut dyn Read, err: 
         tz: &TimeZone::system(),
     };
     // Warnings are dropped: they recur every turn, and `sync` shows them.
-    let mut summaries = vec![Summary {
-        subject: Subject::Config,
-        conditions: Vec::new(),
-    }];
     match sync::sync_repo(&lock, &req) {
         Ok(report) => summaries.push(Summary {
             subject,
