@@ -13,6 +13,7 @@ pub mod group;
 pub mod lock;
 pub mod paths;
 pub mod project;
+pub mod remote;
 pub mod removed;
 pub mod render;
 pub mod repo;
