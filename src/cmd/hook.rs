@@ -102,18 +102,9 @@ pub fn run(vault: Option<&Path>, env: &Env, bd: &Bd, stdin: &mut dyn Read, err: 
     };
     let mut groups = Groups::derive(bd, &config.paths());
     groups.read_prefixes(bd);
-    let mut summaries = vec![Summary {
-        subject: Subject::Config,
-        conditions: Vec::new(),
-    }];
+    let mut summaries = vec![standing::config_summary()];
     let (synced, subject) = match groups.of_target(bd, &repo) {
-        Ok(Some(group)) => (
-            group.representative(Some(&repo)),
-            Subject::Group {
-                database: group.database.clone(),
-                repo: group.members[0].root.clone(),
-            },
-        ),
+        Ok(Some(group)) => (group.representative(Some(&repo)), Subject::group(group)),
         Ok(None) => (&repo, Subject::Checkout(repo.root.clone())),
         Err(e) => {
             fail(env, root, Stage::Config, e.to_string(), err);

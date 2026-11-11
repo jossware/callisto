@@ -5,6 +5,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use crate::errlog::{self, Entry, Stage};
+use crate::group::Group;
 use crate::lock::Lock;
 use crate::paths;
 
@@ -102,6 +103,13 @@ pub enum Subject {
 }
 
 impl Subject {
+    pub fn group(group: &Group) -> Subject {
+        Subject::Group {
+            database: group.database.clone(),
+            repo: group.members[0].root.clone(),
+        }
+    }
+
     pub fn key(&self) -> String {
         match self {
             Subject::Group { database, .. } => format!("group:{}", database.display()),
@@ -148,6 +156,15 @@ impl Summary {
 
     pub fn fails_sync(&self) -> bool {
         self.conditions.iter().any(Condition::fails_sync)
+    }
+}
+
+/// The config has no standing conditions yet. Its summary is still
+/// recorded so a stale entry clears.
+pub fn config_summary() -> Summary {
+    Summary {
+        subject: Subject::Config,
+        conditions: Vec::new(),
     }
 }
 

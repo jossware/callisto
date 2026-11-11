@@ -341,15 +341,15 @@ $XDG_STATE_HOME/callisto/errors.jsonl
 ```
 
 `stage` is one of `config`, `payload`, `lock`, `pull`, `export`,
-`vault`, `render`, `write`, `conditions`, or `panic`. The log is created `0600`,
-since entries carry paths and `bd` output. It is kept under 1 MiB by
-dropping its older half.
+`vault`, `render`, `write`, `conditions`, or `panic`. The log is created
+`0600`, since entries carry paths and `bd` output. It is kept under
+1 MiB by dropping its older half.
 
 Standing conditions are problems that persist across runs: unclaimed
 beads, a missing unfiled folder, an unresolvable entry, a broken group
 rule. They are logged once when they appear or change, and once when
 they clear. `conditions.json` beside the log keeps the last logged
-summary per group, `0600`. Deleting it only re-logs current conditions.
+summary per subject, `0600`. Deleting it only re-logs current conditions.
 
 The same directory holds `sync.lock`. A sync holds it from before
 `bd dolt pull` until its last write, so a run that read stale beads

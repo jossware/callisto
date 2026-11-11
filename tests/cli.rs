@@ -997,6 +997,10 @@ fn home_sync_writes_no_condition_state() {
     assert_no_standing_state(&sb);
     let one = sb.sync(&repo, &[]);
     assert_eq!(one.code, Some(0), "{}", one.stderr);
+    assert_eq!(
+        one.stdout,
+        "a: 0 created, 0 updated, 0 removed, 1 unchanged\n"
+    );
     assert_eq!(one.stderr, "");
     assert_no_standing_state(&sb);
     let hook = sb.hook(&payload(&repo), &[], &[]);
@@ -1012,6 +1016,17 @@ fn unlisted_checkout_writes_no_state() {
     sb.config(&["a"]);
     let one = sb.sync(&c, &[]);
     assert_eq!(one.code, Some(0), "{}", one.stderr);
+    assert_eq!(
+        one.stdout,
+        "c: 1 created, 0 updated, 0 removed, 0 unchanged\n"
+    );
+    assert_eq!(
+        one.stderr,
+        format!(
+            "callisto: {}: warning: prefix \"c\" is not in the configured repo list, so it is unchecked\n",
+            c.canonicalize().unwrap().display()
+        )
+    );
     assert_no_standing_state(&sb);
     let hook = sb.hook(&payload(&c), &[], &[]);
     assert_quiet_exit(&hook);

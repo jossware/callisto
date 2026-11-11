@@ -10,7 +10,7 @@ use jiff::tz::TimeZone;
 use crate::bd::Bd;
 use crate::config::{self, Config, VaultError};
 use crate::errlog::{self, Entry, Stage};
-use crate::group::{Group, Groups};
+use crate::group::Groups;
 use crate::lock::{self, Lock};
 use crate::paths::{self, Env};
 use crate::repo::{self, Repo};
@@ -144,10 +144,7 @@ fn sync(args: &Args, env: &Env, bd: &Bd, cwd: &Path, state: &Path, out: &mut Out
         return;
     }
     let mut groups = Groups::derive(bd, &config.paths());
-    let mut summaries = vec![Summary {
-        subject: Subject::Config,
-        conditions: Vec::new(),
-    }];
+    let mut summaries = vec![standing::config_summary()];
     let pulled = if args.all {
         // Before the prefixes, so they are read from pulled data.
         let pulled = pull(bd, &groups, &repos, out);
@@ -184,7 +181,7 @@ fn sync(args: &Args, env: &Env, bd: &Bd, cwd: &Path, state: &Path, out: &mut Out
         for repo in &pulled {
             if let Some(conditions) = sync_one(repo, out) {
                 let subject = match groups.of_member(&repo.root) {
-                    Some(group) => group_subject(group),
+                    Some(group) => Subject::group(group),
                     None => Subject::Checkout(repo.root.clone()),
                 };
                 summaries.push(Summary {
@@ -203,7 +200,7 @@ fn sync(args: &Args, env: &Env, bd: &Bd, cwd: &Path, state: &Path, out: &mut Out
                     continue;
                 }
                 synced.push(&group.database);
-                (group.representative(Some(target)), group_subject(group))
+                (group.representative(Some(target)), Subject::group(group))
             }
             Ok(None) => (target, Subject::Checkout(target.root.clone())),
             Err(e) => {
@@ -219,13 +216,6 @@ fn sync(args: &Args, env: &Env, bd: &Bd, cwd: &Path, state: &Path, out: &mut Out
         }
     }
     finish(&lock, state, &summaries, out);
-}
-
-fn group_subject(group: &Group) -> Subject {
-    Subject::Group {
-        database: group.database.clone(),
-        repo: group.members[0].root.clone(),
-    }
 }
 
 /// Prints and records the run's summaries while the caller still holds
