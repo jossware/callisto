@@ -31,6 +31,7 @@ pub enum Stage {
     Render,
     Write,
     Panic,
+    Conditions,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -276,6 +277,14 @@ mod tests {
         assert_eq!(value["stage"], "export");
         assert_eq!(value["repo"], serde_json::Value::Null);
         assert!(value["ts"].as_str().unwrap().ends_with('Z'));
+    }
+
+    #[test]
+    fn conditions_stage_serializes_lowercase() {
+        assert_eq!(
+            serde_json::to_string(&Stage::Conditions).unwrap(),
+            "\"conditions\""
+        );
     }
 
     // --- appending ---
