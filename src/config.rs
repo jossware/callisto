@@ -6,15 +6,52 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::de::value::MapAccessDeserializer;
+use serde::{Deserialize, Deserializer, de};
 
 use crate::paths::expand_tilde;
 
 /// Paths are expanded and absolute.
-#[derive(Debug, Default, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub struct Config {
     pub vault: Option<PathBuf>,
-    pub repos: Vec<PathBuf>,
+    pub repos: Vec<RepoEntry>,
+    pub field: Option<String>,
+    pub unfiled: PathBuf,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            vault: None,
+            repos: Vec::new(),
+            field: None,
+            unfiled: PathBuf::from("Inbox"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum RepoEntry {
+    Path(PathBuf),
+    Table(TableEntry),
+}
+
+impl RepoEntry {
+    pub fn path(&self) -> &Path {
+        match self {
+            RepoEntry::Path(path) => path,
+            RepoEntry::Table(table) => &table.path,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TableEntry {
+    pub path: PathBuf,
+    pub field: String,
+    pub value: Option<Vec<String>>,
+    pub project: Option<String>,
 }
 
 // A typo like `repo =` must fail loudly rather than empty the repo list.
@@ -23,7 +60,79 @@ pub struct Config {
 struct Raw {
     vault: Option<PathBuf>,
     #[serde(default)]
-    repos: Vec<PathBuf>,
+    repos: Vec<RawEntry>,
+    field: Option<String>,
+    unfiled: Option<PathBuf>,
+}
+
+enum RawEntry {
+    Path(PathBuf),
+    Table(RawTable),
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawTable {
+    path: PathBuf,
+    field: Option<String>,
+    value: Option<OneOrMany>,
+    project: Option<String>,
+}
+
+struct OneOrMany(Vec<String>);
+
+// Hand-written rather than untagged: an untagged enum reports "did not
+// match any variant" and hides which key was wrong.
+impl<'de> Deserialize<'de> for RawEntry {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+
+        impl<'de> de::Visitor<'de> for Visitor {
+            type Value = RawEntry;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a path or a table")
+            }
+
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<RawEntry, E> {
+                Ok(RawEntry::Path(PathBuf::from(v)))
+            }
+
+            fn visit_map<A: de::MapAccess<'de>>(self, map: A) -> Result<RawEntry, A::Error> {
+                RawTable::deserialize(MapAccessDeserializer::new(map)).map(RawEntry::Table)
+            }
+        }
+
+        deserializer.deserialize_any(Visitor)
+    }
+}
+
+impl<'de> Deserialize<'de> for OneOrMany {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+
+        impl<'de> de::Visitor<'de> for Visitor {
+            type Value = OneOrMany;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a string or a list of strings")
+            }
+
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<OneOrMany, E> {
+                Ok(OneOrMany(vec![v.to_owned()]))
+            }
+
+            fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<OneOrMany, A::Error> {
+                let mut items = Vec::new();
+                while let Some(item) = seq.next_element::<String>()? {
+                    items.push(item);
+                }
+                Ok(OneOrMany(items))
+            }
+        }
+
+        deserializer.deserialize_any(Visitor)
+    }
 }
 
 #[derive(Debug)]
@@ -41,6 +150,10 @@ pub enum ConfigError {
         entry: PathBuf,
     },
     Relative {
+        path: PathBuf,
+        entry: PathBuf,
+    },
+    NoField {
         path: PathBuf,
         entry: PathBuf,
     },
@@ -63,6 +176,12 @@ impl fmt::Display for ConfigError {
                 path.display(),
                 entry.display()
             ),
+            ConfigError::NoField { path, entry } => write!(
+                f,
+                "{}: {}: no field set: set field on the entry or at the top level",
+                path.display(),
+                entry.display()
+            ),
         }
     }
 }
@@ -72,7 +191,9 @@ impl Error for ConfigError {
         match self {
             ConfigError::Read { source, .. } => Some(source),
             ConfigError::Parse { source, .. } => Some(source),
-            ConfigError::NoHome { .. } | ConfigError::Relative { .. } => None,
+            ConfigError::NoHome { .. }
+            | ConfigError::Relative { .. }
+            | ConfigError::NoField { .. } => None,
         }
     }
 }
@@ -112,14 +233,37 @@ impl Config {
             }),
             Some(p) => Ok(p),
         };
+        let mut repos = Vec::with_capacity(raw.repos.len());
+        for entry in raw.repos {
+            repos.push(match entry {
+                RawEntry::Path(path) => RepoEntry::Path(resolve(path)?),
+                RawEntry::Table(table) => {
+                    let path = resolve(table.path)?;
+                    let field = table.field.or_else(|| raw.field.clone()).ok_or_else(|| {
+                        ConfigError::NoField {
+                            path: file.to_path_buf(),
+                            entry: path.clone(),
+                        }
+                    })?;
+                    RepoEntry::Table(TableEntry {
+                        path,
+                        field,
+                        value: table.value.map(|v| v.0),
+                        project: table.project,
+                    })
+                }
+            });
+        }
         Ok(Config {
             vault: raw.vault.map(&resolve).transpose()?,
-            repos: raw
-                .repos
-                .into_iter()
-                .map(&resolve)
-                .collect::<Result<_, _>>()?,
+            repos,
+            field: raw.field,
+            unfiled: raw.unfiled.unwrap_or_else(|| PathBuf::from("Inbox")),
         })
+    }
+
+    pub fn paths(&self) -> Vec<PathBuf> {
+        self.repos.iter().map(|r| r.path().to_path_buf()).collect()
     }
 }
 
@@ -194,7 +338,12 @@ repos = [
             config.unwrap(),
             Config {
                 vault: Some("/h/org".into()),
-                repos: vec!["/h/Workspaces/ganymede".into(), "/h/Workspaces/b".into()],
+                repos: vec![
+                    RepoEntry::Path("/h/Workspaces/ganymede".into()),
+                    RepoEntry::Path("/h/Workspaces/b".into()),
+                ],
+                field: None,
+                unfiled: "Inbox".into(),
             }
         );
     }
@@ -203,6 +352,119 @@ repos = [
     fn empty_file_is_empty() {
         let (_, config) = load_text("", home());
         assert_eq!(config.unwrap(), Config::default());
+    }
+
+    #[test]
+    fn reads_mixed_entries() {
+        let text = r#"
+field = "metadata.repo"
+repos = [
+  "~/a",
+  { path = "~/b", value = "github.com/o/b", project = "B" },
+  { path = "/c", field = "x.y", value = ["o/c", "o/c2"] },
+]
+"#;
+        let (_, config) = load_text(text, home());
+        assert_eq!(
+            config.unwrap().repos,
+            vec![
+                RepoEntry::Path("/h/a".into()),
+                RepoEntry::Table(TableEntry {
+                    path: "/h/b".into(),
+                    field: "metadata.repo".into(),
+                    value: Some(vec!["github.com/o/b".into()]),
+                    project: Some("B".into()),
+                }),
+                RepoEntry::Table(TableEntry {
+                    path: "/c".into(),
+                    field: "x.y".into(),
+                    value: Some(vec!["o/c".into(), "o/c2".into()]),
+                    project: None,
+                }),
+            ]
+        );
+    }
+
+    #[test]
+    fn table_value_and_project_optional() {
+        let text = "field = \"f\"\nrepos = [{ path = \"/b\" }]";
+        let (_, config) = load_text(text, home());
+        assert_eq!(
+            config.unwrap().repos,
+            vec![RepoEntry::Table(TableEntry {
+                path: "/b".into(),
+                field: "f".into(),
+                value: None,
+                project: None,
+            })]
+        );
+    }
+
+    #[test]
+    fn table_without_field_is_an_error() {
+        let (_, config) = load_text(r#"repos = [{ path = "/b" }]"#, home());
+        assert!(
+            matches!(&config, Err(ConfigError::NoField { entry, .. }) if entry == Path::new("/b"))
+        );
+        assert!(config.unwrap_err().to_string().contains("no field set"));
+    }
+
+    #[test]
+    fn unknown_key_in_table_names_it() {
+        let text = "field = \"f\"\nrepos = [{ path = \"/b\", projet = \"B\" }]";
+        let (_, config) = load_text(text, home());
+        let err = config.unwrap_err();
+        assert!(matches!(err, ConfigError::Parse { .. }));
+        let text = err.to_string();
+        assert!(text.contains("projet"), "{text}");
+        assert!(!text.contains("did not match any variant"), "{text}");
+    }
+
+    #[test]
+    fn unknown_top_level_key_names_it() {
+        let (_, config) = load_text(r#"repo = ["/x"]"#, home());
+        assert!(config.unwrap_err().to_string().contains("repo"));
+    }
+
+    #[test]
+    fn wrong_entry_type_is_an_error() {
+        for text in ["repos = [1]", r#"repos = [["/x"]]"#] {
+            let (_, config) = load_text(text, home());
+            let err = config.unwrap_err();
+            assert!(matches!(err, ConfigError::Parse { .. }));
+            assert!(err.to_string().contains("path or a table"), "{err}");
+        }
+    }
+
+    #[test]
+    fn wrong_value_type_is_an_error() {
+        let text = "field = \"f\"\nrepos = [{ path = \"/b\", value = 1 }]";
+        let (_, config) = load_text(text, home());
+        assert!(matches!(config, Err(ConfigError::Parse { .. })));
+    }
+
+    #[test]
+    fn table_path_is_expanded_and_absolute() {
+        let text = "field = \"f\"\nrepos = [{ path = \"rel\" }]";
+        let (_, config) = load_text(text, home());
+        assert!(matches!(config, Err(ConfigError::Relative { .. })));
+        let text = "field = \"f\"\nrepos = [{ path = \"~/b\" }]";
+        let (_, config) = load_text(text, None);
+        assert!(matches!(config, Err(ConfigError::NoHome { .. })));
+    }
+
+    #[test]
+    fn missing_checkout_loads() {
+        let text = "field = \"f\"\nrepos = [{ path = \"/does/not/exist\", value = \"v\" }]";
+        let (_, config) = load_text(text, home());
+        assert!(config.is_ok());
+    }
+
+    #[test]
+    fn unfiled_defaults_to_inbox() {
+        assert_eq!(Config::default().unfiled, Path::new("Inbox"));
+        let (_, config) = load_text("", home());
+        assert_eq!(config.unwrap().unfiled, Path::new("Inbox"));
     }
 
     #[test]
@@ -257,7 +519,9 @@ repos = [
             config.unwrap(),
             Config {
                 vault: Some("/v".into()),
-                repos: vec!["/r".into()],
+                repos: vec![RepoEntry::Path("/r".into())],
+                field: None,
+                unfiled: "Inbox".into(),
             }
         );
     }
@@ -265,7 +529,7 @@ repos = [
     fn cfg() -> Config {
         Config {
             vault: Some("/cfg".into()),
-            repos: vec![],
+            ..Config::default()
         }
     }
 
