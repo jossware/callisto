@@ -3,6 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use jiff::tz::TimeZone;
@@ -11,17 +12,17 @@ use crate::bd::Bd;
 use crate::claim::{self, Unclaimed};
 use crate::errlog::Stage;
 use crate::export::{self, ExportError};
-use crate::field_path::FieldValue;
+use crate::field_path::{FieldPath, FieldValue};
 use crate::filename;
 use crate::graph::Graph;
 use crate::group::FieldClaims;
 use crate::lock::Lock;
 use crate::project::{self, Project, Unmapped};
 use crate::removed;
-use crate::render::{self, frontmatter::Context, link::Links};
+use crate::render::{self, frontmatter::Context, link::Links, unfiled};
 use crate::repo::{self, Repo, SettingsError};
 use crate::standing::Condition;
-use crate::vault::{Generated, Index, ScanError, owner};
+use crate::vault::{self, Generated, Index, ScanError, owner};
 use crate::write;
 
 /// The issue prefixes of the configured repos, which decide which repo
@@ -44,6 +45,8 @@ pub struct Request<'a> {
     /// Some table entry could not be resolved, so a bead missing from
     /// this export may belong to that entry.
     pub degraded: bool,
+    /// Vault-relative folder for a table group's index of unclaimed beads.
+    pub unfiled: &'a Path,
 }
 
 /// Paths are relative to the vault, in the order they were written.
@@ -300,6 +303,11 @@ pub fn sync_repo(_lock: &Lock, req: &Request) -> Result<Report, Error> {
             }),
         }
     }
+    if let Some(claims) = req.claims
+        && !req.degraded
+    {
+        write_index(req, &prefix, &claims.field, &mut report)?;
+    }
     if req.claims.is_some() && req.degraded {
         report.warnings.push(Warning::Degraded);
         return Ok(report);
@@ -319,6 +327,51 @@ pub fn sync_repo(_lock: &Lock, req: &Request) -> Result<Report, Error> {
         &mut report,
     )?;
     Ok(report)
+}
+
+/// A degraded run must not call this: its unclaimed list may hold beads
+/// an unresolvable entry would claim.
+fn write_index(
+    req: &Request,
+    prefix: &str,
+    field: &FieldPath,
+    report: &mut Report,
+) -> Result<(), Error> {
+    if !req.vault.join(req.unfiled).is_dir() {
+        report.conditions.push(Condition::UnfiledMissing {
+            folder: req.unfiled.into(),
+        });
+        return Ok(());
+    }
+    let rel = req.unfiled.join(unfiled::file_name(prefix));
+    let path = req.vault.join(&rel);
+    let text = unfiled::index(prefix, field, &report.unclaimed);
+    let io_err = |source| {
+        Error::Note(write::Error::Io {
+            path: path.clone(),
+            source,
+        })
+    };
+    match fs::symlink_metadata(&path) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => match write::create(&path, &text) {
+            Ok(()) => report.created.push(rel),
+            Err(write::Error::Taken(_)) => {
+                report.conditions.push(Condition::IndexTaken { path: rel })
+            }
+            Err(e) => return Err(Error::Note(e)),
+        },
+        Err(e) => return Err(io_err(e)),
+        Ok(_) if vault::own_index(&path, prefix).map_err(io_err)? => {
+            if fs::read(&path).map_err(io_err)? == text.as_bytes() {
+                report.unchanged += 1;
+            } else {
+                write::replace(&path, &text).map_err(Error::Note)?;
+                report.updated.push(rel);
+            }
+        }
+        Ok(_) => report.conditions.push(Condition::IndexTaken { path: rel }),
+    }
+    Ok(())
 }
 
 /// Who decides where this run files notes, known before the export.

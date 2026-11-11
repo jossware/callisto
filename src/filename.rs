@@ -6,7 +6,7 @@
 pub const TITLE_MAX_BYTES: usize = 120;
 
 /// Illegal in a filename on some platform, or breaks an Obsidian link.
-const ILLEGAL: &[char] = &[
+pub(crate) const ILLEGAL: &[char] = &[
     '/', '\\', ':', '*', '?', '"', '<', '>', '|', '#', '^', '[', ']',
 ];
 

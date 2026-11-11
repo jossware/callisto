@@ -1119,6 +1119,7 @@ fn conditions(sb: &Sandbox) -> Vec<Value> {
 
 /// Checkouts `a` (prefix `w`) and `b`, sharing `a`'s database, whose
 /// export holds `w-1` for `o/a`, `w-2` for `o/b` and `w-3` for neither.
+/// The vault has the default unfiled folder.
 fn rollout(sb: &Sandbox, a: &str, b: &str) {
     sb.repo("a", "w", &[]);
     sb.repo("b", "w", &[]);
@@ -1131,6 +1132,7 @@ fn rollout(sb: &Sandbox, a: &str, b: &str) {
             meta_line("w-3", "third", None),
         ],
     );
+    fs::create_dir_all(sb.vault().join("Inbox")).unwrap();
 }
 
 #[test]
@@ -1180,6 +1182,11 @@ fn rollout_shared_database_two_repos_one_unclaimed() {
     assert_eq!(a.matches("export").count(), 1, "{a}");
     let b = sb.calls("b").unwrap_or_default();
     assert!(!b.contains("export"), "{b}");
+    let index = fs::read_to_string(sb.vault().join("Inbox/Unfiled beads - w.md")).unwrap();
+    assert!(index.contains("| w-3 | third |"), "{index}");
+    for id in ["w-1", "w-2"] {
+        assert!(!index.contains(&format!("| {id} |")), "{index}");
+    }
     let before = conditions(&sb).len();
     let again = sb.run(&sb.path("home"), &["sync", "--all"]);
     assert_eq!(again.code, Some(0), "{}", again.stderr);
@@ -1377,6 +1384,7 @@ fn degraded_table_group_skips_removal() {
         sb.toml_path("b")
     ));
     sb.export("a", &[meta_line("w-9", "old", Some("o/a"))]);
+    fs::create_dir_all(sb.vault().join("Inbox")).unwrap();
     let repos = sb.path("repos");
     sb.run(&repos, &["sync", "a"]);
     let old = sb.vault().join("Projects/a/old - w-9.md");
@@ -1397,4 +1405,70 @@ fn degraded_table_group_skips_removal() {
     assert_eq!(out.code, Some(0), "{}", out.stderr);
     let text = fs::read_to_string(&old).unwrap();
     assert!(text.contains("beadRemoved: true"), "{text}");
+}
+
+fn two_entry_config(sb: &Sandbox, extra: &str) {
+    sb.config_text(&format!(
+        "{extra}field = \"metadata.repo\"\nrepos = [{{ path = {}, value = \"o/a\" }}, {{ path = {}, value = \"o/b\" }}]\n",
+        sb.toml_path("a"),
+        sb.toml_path("b")
+    ));
+}
+
+#[test]
+fn missing_unfiled_folder_fails_sync() {
+    let sb = Sandbox::new();
+    rollout(&sb, "o/a", "o/b");
+    fs::remove_dir(sb.vault().join("Inbox")).unwrap();
+    two_entry_config(&sb, "");
+    let out = sb.run(&sb.path("home"), &["sync", "--all"]);
+    assert_eq!(out.code, Some(1), "{}", out.stderr);
+    assert!(
+        out.stderr
+            .contains("unfiled folder \"Inbox\" is missing; index not written"),
+        "{}",
+        out.stderr
+    );
+    assert!(!sb.vault().join("Inbox").exists());
+    assert!(sb.note("Projects/a/first - w-1.md"));
+    assert!(sb.note("Projects/b/second - w-2.md"));
+    let before = conditions(&sb).len();
+    sb.run(&sb.path("home"), &["sync", "--all"]);
+    assert_eq!(conditions(&sb).len(), before, "{:?}", sb.log());
+}
+
+#[test]
+fn custom_unfiled_folder() {
+    let sb = Sandbox::new();
+    rollout(&sb, "o/a", "o/b");
+    fs::create_dir_all(sb.vault().join("Beads/Unfiled")).unwrap();
+    two_entry_config(&sb, "unfiled = \"Beads/Unfiled\"\n");
+    let out = sb.run(&sb.path("home"), &["sync", "--all"]);
+    assert_eq!(out.code, Some(0), "{}", out.stderr);
+    assert!(
+        sb.note("Beads/Unfiled/Unfiled beads - w.md"),
+        "{}",
+        out.stderr
+    );
+}
+
+#[test]
+fn hook_writes_index() {
+    let sb = Sandbox::new();
+    rollout(&sb, "o/a", "o/b");
+    two_entry_config(&sb, "");
+    let out = sb.hook(&payload(&sb.path("repos/a")), &[], &[]);
+    assert_quiet_exit(&out);
+    assert!(sb.note("Inbox/Unfiled beads - w.md"), "{:?}", sb.log());
+}
+
+#[test]
+fn path_only_config_writes_no_index() {
+    let sb = Sandbox::new();
+    sb.repo("a", "a", &[("a-1", "first")]);
+    sb.config(&["a"]);
+    fs::create_dir(sb.vault().join("Inbox")).unwrap();
+    let out = sb.run(&sb.path("home"), &["sync", "--all"]);
+    assert_eq!(out.code, Some(0), "{}", out.stderr);
+    assert_eq!(fs::read_dir(sb.vault().join("Inbox")).unwrap().count(), 0);
 }

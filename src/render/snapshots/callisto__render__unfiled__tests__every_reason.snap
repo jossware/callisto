@@ -1,0 +1,20 @@
+---
+source: src/render/unfiled.rs
+expression: "index(\"zz\", &field(), &five())"
+---
+---
+generatedBy: callisto
+beadPrefix: zz
+obsidianUIMode: preview
+---
+
+> [!info] Beads no repo claims · zz
+> callisto rewrites this note on every sync. Edits are lost.
+
+| Bead | Title | Status | Reason |
+| --- | --- | --- | --- |
+| zz-2 | title zz-2 | open | no metadata.repo |
+| zz-3 | title zz-3 | blocked | metadata.repo is "o/y" |
+| zz-9 | title zz-9 | in\_progress | metadata.repo is 7 |
+| zz-1 | title zz-1 | closed | project "Gone" is not in the vault |
+| zz-10 | title zz-10 | closed | metadata.repo is "o/z" |

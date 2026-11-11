@@ -17,6 +17,7 @@ use callisto::lock;
 use callisto::repo::{self, Repo};
 use callisto::standing::Condition;
 use callisto::sync::{self, Report, Request, Scope, Warning};
+use callisto::vault::Index;
 
 mod common;
 
@@ -149,6 +150,7 @@ impl Fixture {
                 tz: &tz,
                 claims,
                 degraded,
+                unfiled: Path::new("Inbox"),
             },
         )
     }
@@ -160,6 +162,13 @@ impl Fixture {
     fn snapshot(&self) -> Snapshot {
         let mut out = BTreeMap::new();
         walk(&self.vault, Path::new(""), &mut out);
+        out
+    }
+
+    /// `snapshot` without the unfiled folder, which a table run rewrites.
+    fn snapshot_notes(&self) -> Snapshot {
+        let mut out = self.snapshot();
+        out.retain(|path, _| !path.starts_with("Inbox"));
         out
     }
 }
@@ -809,6 +818,7 @@ fn table() -> Fixture {
     let f = fixture("zz", "repo");
     put(&f.vault, "Projects/A/A.md", "# A\n");
     put(&f.vault, "Projects/B/B.md", "# B\n");
+    fs::create_dir_all(f.vault.join("Inbox")).unwrap();
     f
 }
 
@@ -817,6 +827,7 @@ fn a_and_b() -> FieldClaims {
 }
 
 const ONE: &str = "Projects/A/one - zz-1.md";
+const INDEX: &str = "Inbox/Unfiled beads - zz.md";
 const REPO_A: Option<&str> = Some(r#"{"repo":"o/a"}"#);
 
 #[test]
@@ -827,7 +838,10 @@ fn claimed_beads_file_under_their_project() {
         field_line("zz-2", "two", "open", Some(r#"{"repo":"o/b"}"#)),
     ]);
     let report = f.run_claims(&a_and_b(), false).unwrap();
-    assert_eq!(report.created, paths(&[ONE, "Projects/B/two - zz-2.md"]));
+    assert_eq!(
+        report.created,
+        paths(&[ONE, "Projects/B/two - zz-2.md", INDEX])
+    );
     let one = f.read(ONE);
     assert!(one.contains("\nprojects:\n  - \"[[A]]\"\n"), "{one}");
     let two = f.read("Projects/B/two - zz-2.md");
@@ -848,17 +862,17 @@ fn value_list_claims_old_name() {
     let report = f
         .run_claims(&claims(&[(&["o/b", "o/b-old"], "B")]), false)
         .unwrap();
-    assert_eq!(report.created, paths(&["Projects/B/one - zz-1.md"]));
+    assert_eq!(report.created, paths(&["Projects/B/one - zz-1.md", INDEX]));
 }
 
 #[test]
 fn unclaimed_bead_gets_no_note() {
     let f = table();
     f.set_export(&[field_line("zz-3", "three", "open", None)]);
-    let before = f.snapshot();
+    let before = f.snapshot_notes();
     let report = f.run_claims(&a_and_b(), false).unwrap();
-    assert_eq!(f.snapshot(), before);
-    assert!(report.created.is_empty());
+    assert_eq!(f.snapshot_notes(), before);
+    assert_eq!(report.created, paths(&[INDEX]));
     assert_eq!(
         report.unclaimed,
         [Unclaimed {
@@ -883,16 +897,13 @@ fn non_string_field_is_unclaimed() {
         field_line("zz-1", "one", "open", Some(r#"{"repo":7}"#)),
         field_line("zz-2", "two", "open", Some(r#"{"repo":["o/a"]}"#)),
     ]);
-    let before = f.snapshot();
+    let before = f.snapshot_notes();
     let report = f.run_claims(&a_and_b(), false).unwrap();
-    assert_eq!(f.snapshot(), before);
+    assert_eq!(f.snapshot_notes(), before);
     let reasons: Vec<&Reason> = report.unclaimed.iter().map(|u| &u.reason).collect();
     assert_eq!(
         reasons,
-        [
-            &Reason::Value("7".into()),
-            &Reason::Value("[\"o/a\"]".into())
-        ]
+        [&Reason::Json("7".into()), &Reason::Json("[\"o/a\"]".into())]
     );
     assert_eq!(
         report.conditions,
@@ -906,9 +917,9 @@ fn non_string_field_is_unclaimed() {
 fn missing_project_is_unclaimed() {
     let f = table();
     f.set_export(&[field_line("zz-1", "one", "open", REPO_A)]);
-    let before = f.snapshot();
+    let before = f.snapshot_notes();
     let report = f.run_claims(&claims(&[(&["o/a"], "Gone")]), false).unwrap();
-    assert_eq!(f.snapshot(), before);
+    assert_eq!(f.snapshot_notes(), before);
     assert_eq!(
         report.unclaimed[0].reason,
         Reason::MissingProject("Gone".into())
@@ -932,7 +943,7 @@ fn unclaimed_existing_note_is_left_alone() {
     let f = table();
     f.set_export(&[field_line("zz-1", "one", "open", REPO_A)]);
     f.run_claims(&a_and_b(), false).unwrap();
-    let before = f.snapshot();
+    let before = f.snapshot_notes();
     f.set_export(&[field_line(
         "zz-1",
         "renamed",
@@ -940,8 +951,9 @@ fn unclaimed_existing_note_is_left_alone() {
         Some(r#"{"repo":"o/z"}"#),
     )]);
     let report = f.run_claims(&a_and_b(), false).unwrap();
-    assert_eq!(f.snapshot(), before);
-    assert!(report.removed.is_empty() && report.updated.is_empty());
+    assert_eq!(f.snapshot_notes(), before);
+    assert!(report.removed.is_empty());
+    assert_eq!(report.updated, paths(&[INDEX]));
     assert_eq!(report.unclaimed[0].reason, Reason::Value("o/z".into()));
 }
 
@@ -971,7 +983,7 @@ fn link_to_unclaimed_bead_shows_id() {
     let child = format!("{}{deps}", child.strip_suffix('}').unwrap());
     f.set_export(&[child, field_line("zz-2", "first", "open", None)]);
     let report = f.run_claims(&a_and_b(), false).unwrap();
-    assert_eq!(report.created, paths(&[ONE]));
+    assert_eq!(report.created, paths(&[ONE, INDEX]));
     assert_links_show(&f.read(ONE), "zz-2");
 }
 
@@ -1002,5 +1014,211 @@ fn table_sync_ignores_project_override() {
     fs::write(f.repo.root.join(".beads/project"), "A").unwrap();
     f.set_export(&[field_line("zz-1", "one", "open", Some(r#"{"repo":"o/b"}"#))]);
     let report = f.run_claims(&a_and_b(), false).unwrap();
-    assert_eq!(report.created, paths(&["Projects/B/one - zz-1.md"]));
+    assert_eq!(report.created, paths(&["Projects/B/one - zz-1.md", INDEX]));
+}
+
+const VALID_INDEX: &str = "---\ngeneratedBy: callisto\nbeadPrefix: zz\n---\n";
+
+/// Exports claimed `zz-1` and unclaimed `zz-3`, and runs.
+fn index_run(f: &Fixture) -> Report {
+    f.set_export(&[
+        field_line("zz-1", "one", "open", REPO_A),
+        field_line("zz-3", "three", "open", None),
+    ]);
+    f.run_claims(&a_and_b(), false).unwrap()
+}
+
+fn has_condition(report: &Report, want: &Condition) -> bool {
+    report.conditions.contains(want)
+}
+
+#[test]
+fn index_lists_unclaimed() {
+    let f = table();
+    let report = index_run(&f);
+    assert_eq!(report.created, paths(&[ONE, INDEX]));
+    let index = f.read(INDEX);
+    assert!(
+        index.contains("| zz-3 | three | open | no metadata.repo |"),
+        "{index}"
+    );
+    assert!(!index.contains("zz-1"), "{index}");
+}
+
+#[test]
+fn index_empties_once_claimed() {
+    let f = table();
+    index_run(&f);
+    f.set_export(&[
+        field_line("zz-1", "one", "open", REPO_A),
+        field_line("zz-3", "three", "open", Some(r#"{"repo":"o/b"}"#)),
+    ]);
+    let report = f.run_claims(&a_and_b(), false).unwrap();
+    assert!(report.updated.contains(&PathBuf::from(INDEX)), "{report:?}");
+    let index = f.read(INDEX);
+    assert!(index.contains("No unclaimed beads."), "{index}");
+    assert!(f.vault.join("Projects/B/three - zz-3.md").is_file());
+}
+
+#[test]
+fn unchanged_index_is_not_rewritten() {
+    let f = table();
+    index_run(&f);
+    let before = f.snapshot()[Path::new(INDEX)].clone();
+    let report = index_run(&f);
+    assert!(report.updated.is_empty(), "{:?}", report.updated);
+    assert!(report.created.is_empty(), "{:?}", report.created);
+    assert_eq!(f.snapshot()[Path::new(INDEX)], before);
+}
+
+#[test]
+fn missing_unfiled_folder() {
+    let f = table();
+    fs::remove_dir(f.vault.join("Inbox")).unwrap();
+    let report = index_run(&f);
+    assert_eq!(report.created, paths(&[ONE]));
+    assert!(!f.vault.join("Inbox").exists());
+    assert!(
+        has_condition(
+            &report,
+            &Condition::UnfiledMissing {
+                folder: "Inbox".into()
+            }
+        ),
+        "{:?}",
+        report.conditions
+    );
+}
+
+fn assert_index_taken(f: &Fixture, text: &str) {
+    put(&f.vault, INDEX, text);
+    // zz-9 stays exported so a bead note at INDEX is not marked removed.
+    f.set_export(&[
+        field_line("zz-3", "three", "open", None),
+        field_line("zz-9", "nine", "open", None),
+    ]);
+    let report = f.run_claims(&a_and_b(), false).unwrap();
+    assert_eq!(f.read(INDEX), text);
+    assert!(
+        has_condition(&report, &Condition::IndexTaken { path: INDEX.into() }),
+        "{:?}",
+        report.conditions
+    );
+}
+
+#[test]
+fn hand_written_index_is_taken() {
+    assert_index_taken(&table(), "# mine\n");
+}
+
+#[test]
+fn bead_note_at_index_is_taken() {
+    assert_index_taken(
+        &table(),
+        "---\nbead: zz-9\ngeneratedBy: callisto\nbeadPrefix: zz\n---\n",
+    );
+}
+
+#[test]
+fn other_prefix_index_is_taken() {
+    assert_index_taken(
+        &table(),
+        "---\ngeneratedBy: callisto\nbeadPrefix: yy\n---\n",
+    );
+}
+
+#[test]
+fn non_utf8_index_is_taken() {
+    let f = table();
+    let bytes = b"---\ngeneratedBy: callisto\nbeadPrefix: zz\n---\n\xff\n";
+    fs::write(f.vault.join(INDEX), bytes).unwrap();
+    let report = index_run(&f);
+    assert_eq!(fs::read(f.vault.join(INDEX)).unwrap(), bytes);
+    assert!(
+        has_condition(&report, &Condition::IndexTaken { path: INDEX.into() }),
+        "{:?}",
+        report.conditions
+    );
+}
+
+#[test]
+fn symlinked_index_is_taken() {
+    let f = table();
+    put(&f.vault, "Inbox/real.md", VALID_INDEX);
+    std::os::unix::fs::symlink(f.vault.join("Inbox/real.md"), f.vault.join(INDEX)).unwrap();
+    let report = index_run(&f);
+    assert_eq!(f.read("Inbox/real.md"), VALID_INDEX);
+    assert!(
+        fs::symlink_metadata(f.vault.join(INDEX))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert!(
+        has_condition(&report, &Condition::IndexTaken { path: INDEX.into() }),
+        "{:?}",
+        report.conditions
+    );
+}
+
+#[test]
+fn degraded_writes_no_index() {
+    let f = table();
+    f.set_export(&[field_line("zz-3", "three", "open", None)]);
+    let report = f.run_claims(&a_and_b(), true).unwrap();
+    assert!(!f.vault.join(INDEX).exists());
+    assert!(
+        !report.conditions.iter().any(|c| matches!(
+            c,
+            Condition::UnfiledMissing { .. } | Condition::IndexTaken { .. }
+        )),
+        "{:?}",
+        report.conditions
+    );
+}
+
+#[test]
+fn degraded_keeps_existing_index() {
+    let f = table();
+    f.set_export(&[field_line("zz-3", "three", "open", None)]);
+    f.run_claims(&a_and_b(), false).unwrap();
+    assert!(f.read(INDEX).contains("zz-3"));
+    f.set_export(&[field_line("zz-3", "three", "open", REPO_A)]);
+    let before = f.snapshot();
+    let report = f.run_claims(&a_and_b(), true).unwrap();
+    assert_eq!(
+        f.snapshot().get(Path::new(INDEX)),
+        before.get(Path::new(INDEX))
+    );
+    assert!(before.contains_key(Path::new(INDEX)));
+    assert!(
+        !report.conditions.iter().any(|c| matches!(
+            c,
+            Condition::UnfiledMissing { .. } | Condition::IndexTaken { .. }
+        )),
+        "{:?}",
+        report.conditions
+    );
+}
+
+#[test]
+fn path_group_writes_no_index() {
+    let f = fixture("a", "a");
+    fs::create_dir_all(f.vault.join("Inbox")).unwrap();
+    f.set_export(&[line("a-1", "first", "open")]);
+    let report = f.run().unwrap();
+    assert_eq!(fs::read_dir(f.vault.join("Inbox")).unwrap().count(), 0);
+    assert!(report.conditions.is_empty(), "{:?}", report.conditions);
+}
+
+#[test]
+fn index_is_not_a_bead_note() {
+    let f = table();
+    index_run(&f);
+    let index = Index::scan(&f.vault).unwrap();
+    assert!(
+        index.notes().iter().all(|n| n.path != Path::new(INDEX)),
+        "{:?}",
+        index.notes()
+    );
 }

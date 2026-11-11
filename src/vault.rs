@@ -215,6 +215,23 @@ fn walk(
     Ok(())
 }
 
+/// Whether `path` is the unfiled index callisto wrote for `prefix`. A
+/// symlink is never one: rewriting it would write through to its target.
+/// Neither is a file that is not valid UTF-8: replacing it would lose
+/// bytes callisto cannot have written.
+pub fn own_index(path: &Path, prefix: &str) -> io::Result<bool> {
+    if !fs::symlink_metadata(path)?.is_file() {
+        return Ok(false);
+    }
+    let Ok(text) = String::from_utf8(fs::read(path)?) else {
+        return Ok(false);
+    };
+    let found = fields::read(&text);
+    Ok(found.generated_by.as_deref() == Some(MARKER_VALUE)
+        && !found.bead_key
+        && found.bead_prefix.as_deref() == Some(prefix))
+}
+
 /// A note's lines up to its frontmatter's closing line, so a long body
 /// is never read.
 fn head(path: &Path) -> io::Result<String> {
@@ -474,5 +491,74 @@ mod tests {
         assert!(!odd.owned_by("a-b-1", "a-b", &["a", "a-b"]));
         assert!(legacy.owned_by("a-2", "a", &["a"]));
         assert!(!legacy.owned_by("a-2", "a-b", &["a", "a-b"]));
+    }
+
+    const INDEX: &str = "---\ngeneratedBy: callisto\nbeadPrefix: zz\n---\n";
+
+    fn own(root: &Path, rel: &str) -> bool {
+        own_index(&root.join(rel), "zz").unwrap()
+    }
+
+    #[test]
+    fn own_index_is_a_marked_beadless_note_for_the_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        put(root, "valid.md", INDEX);
+        put(root, "unmarked.md", "---\nbeadPrefix: zz\n---\n");
+        put(
+            root,
+            "bead.md",
+            "---\nbead: zz-1\ngeneratedBy: callisto\nbeadPrefix: zz\n---\n",
+        );
+        put(
+            root,
+            "other.md",
+            "---\ngeneratedBy: callisto\nbeadPrefix: yy\n---\n",
+        );
+        assert!(own(root, "valid.md"));
+        assert!(!own(root, "unmarked.md"));
+        assert!(!own(root, "bead.md"));
+        assert!(!own(root, "other.md"));
+    }
+
+    #[test]
+    fn own_index_is_never_a_note_with_an_empty_bead_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for (name, bead) in [
+            ("bare.md", "bead:"),
+            ("list.md", "bead: []"),
+            ("quoted.md", "bead: \"\""),
+        ] {
+            put(
+                root,
+                name,
+                &format!("---\n{bead}\ngeneratedBy: callisto\nbeadPrefix: zz\n---\n"),
+            );
+            assert!(!own(root, name), "{bead}");
+        }
+    }
+
+    #[test]
+    fn own_index_is_never_non_utf8() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(
+            root.join("bad.md"),
+            b"---\ngeneratedBy: callisto\nbeadPrefix: zz\n---\n\xff\n",
+        )
+        .unwrap();
+        assert!(!own(root, "bad.md"));
+    }
+
+    #[test]
+    fn own_index_is_never_a_symlink_or_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        put(root, "valid.md", INDEX);
+        symlink(root.join("valid.md"), root.join("link.md")).unwrap();
+        fs::create_dir(root.join("dir.md")).unwrap();
+        assert!(!own(root, "link.md"));
+        assert!(!own(root, "dir.md"));
     }
 }
