@@ -13,7 +13,8 @@ use crate::paths::expand_tilde;
 
 const DEFAULT_UNFILED: &str = "Inbox";
 
-/// Paths are expanded and absolute.
+/// Vault and repo paths are expanded and absolute. `unfiled` is relative
+/// to the vault.
 #[derive(Debug, PartialEq)]
 pub struct Config {
     pub vault: Option<PathBuf>,
@@ -52,7 +53,9 @@ impl RepoEntry {
 pub struct TableEntry {
     pub path: PathBuf,
     pub field: String,
+    // `None` means resolved at sync time.
     pub value: Option<Vec<String>>,
+    // `None` means resolved at sync time.
     pub project: Option<String>,
 }
 
@@ -256,6 +259,7 @@ impl Config {
             .unfiled
             .unwrap_or_else(|| PathBuf::from(DEFAULT_UNFILED));
         check_unfiled(&unfiled).map_err(|r| invalid("unfiled", r))?;
+        let vault = raw.vault.map(&resolve).transpose()?;
         let mut repos = Vec::with_capacity(raw.repos.len());
         for (i, entry) in raw.repos.into_iter().enumerate() {
             repos.push(match entry {
@@ -273,7 +277,10 @@ impl Config {
                     if let Some(value) = &table.value
                         && (value.0.is_empty() || value.0.iter().any(String::is_empty))
                     {
-                        return Err(invalid(&key("value"), "must be non-empty strings"));
+                        return Err(invalid(
+                            &key("value"),
+                            "must be a non-empty string or list of non-empty strings",
+                        ));
                     }
                     if table.project.as_deref() == Some("") {
                         return Err(invalid(&key("project"), "must not be empty"));
@@ -288,7 +295,7 @@ impl Config {
             });
         }
         Ok(Config {
-            vault: raw.vault.map(&resolve).transpose()?,
+            vault,
             repos,
             field: raw.field,
             unfiled,
@@ -309,6 +316,13 @@ fn check_field(field: &str) -> Result<(), &'static str> {
 
 // Relative to the vault root, so it must not escape or depend on the cwd.
 fn check_unfiled(unfiled: &Path) -> Result<(), &'static str> {
+    // Path::components normalises `a/./b` and a trailing `/`, so check the
+    // raw segments.
+    if let Some(raw) = unfiled.to_str()
+        && raw.split('/').any(|s| s.is_empty() || s == ".")
+    {
+        return Err("must be a relative path inside the vault");
+    }
     let mut components = unfiled.components().peekable();
     if components.peek().is_none() || !components.all(|c| matches!(c, Component::Normal(_))) {
         return Err("must be a relative path inside the vault");
@@ -614,6 +628,23 @@ repos = [
         assert!(
             matches!(config, Err(ConfigError::Relative { entry, .. }) if entry == Path::new("Workspaces/ganymede"))
         );
+    }
+
+    #[test]
+    fn vault_error_reported_before_repos() {
+        let (_, config) = load_text("vault = \"rel\"\nrepos = [\"also-rel\"]", home());
+        assert!(
+            matches!(config, Err(ConfigError::Relative { entry, .. }) if entry == Path::new("rel"))
+        );
+    }
+
+    #[test]
+    fn unfiled_with_empty_or_dot_segments_is_an_error() {
+        for bad in ["a/./b", "Inbox/", "a//b"] {
+            assert_eq!(invalid_key(&format!("unfiled = \"{bad}\"")), "unfiled");
+        }
+        let (_, config) = load_text(r#"unfiled = "Inbox/beads""#, home());
+        assert_eq!(config.unwrap().unfiled, Path::new("Inbox/beads"));
     }
 
     #[test]
