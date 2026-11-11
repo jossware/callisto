@@ -91,7 +91,6 @@ pub fn parse_with_field(jsonl: &str, field: Option<&FieldPath>) -> Result<Export
         {
             continue;
         }
-        // Resolved before deserializing, which consumes the value.
         let resolved = field.map(|path| path.resolve(&value));
         let record = Record::deserialize(value).map_err(err)?;
         if is_scaffolding(&record) {
