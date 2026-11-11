@@ -233,3 +233,17 @@ fn unlisted_target_on_another_database_is_none() {
     let g = f.groups(&[a]);
     assert!(g.of_target(&f.bd, &c).unwrap().is_none());
 }
+
+#[test]
+fn one_failing_root_is_ungrouped_once() {
+    let f = fixture();
+    let b = f.repo("b", "b");
+    fs::write(b.join(".beads/context-fails"), "").unwrap();
+    let sub = b.join("sub");
+    fs::create_dir_all(&sub).unwrap();
+    let g = f.groups(&[b.clone(), sub.clone()]);
+    assert_eq!(g.ungrouped.len(), 1);
+    let calls = f.calls(&b);
+    assert_eq!(calls.matches("context").count(), 1, "{calls}");
+    assert_eq!(g.scope().unreadable, [b, sub]);
+}

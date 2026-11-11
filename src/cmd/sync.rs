@@ -138,25 +138,25 @@ fn sync(args: &Args, env: &Env, bd: &Bd, cwd: &Path, state: &Path, out: &mut Out
         Ok(lock) => lock,
         Err(e) => return out.fail(Stage::Lock, None, e),
     };
-    let mut repos = resolve(&targets, out);
-    if args.all {
-        // Before the scope, so prefixes are read from pulled data.
-        repos.retain(|repo| match bd.run(&repo.root, &["dolt", "pull"]) {
-            Ok(_) => true,
-            Err(e) => {
-                out.fail(Stage::Pull, Some(&repo.root), e);
-                false
-            }
-        });
-    }
+    let repos = resolve(&targets, out);
     if repos.is_empty() {
         return;
     }
     let mut groups = Groups::derive(bd, &config.repos);
+    let pulled = if args.all {
+        // Before the prefixes, so they are read from pulled data.
+        let pulled = pull(bd, &groups, &repos, out);
+        if pulled.is_empty() {
+            return;
+        }
+        Some(pulled)
+    } else {
+        None
+    };
     groups.read_prefixes(bd);
     let scope = groups.scope();
     let tz = TimeZone::system();
-    for repo in &repos {
+    let sync_one = |repo: &Repo, out: &mut Out| {
         let req = Request {
             bd,
             vault: &vault,
@@ -168,7 +168,56 @@ fn sync(args: &Args, env: &Env, bd: &Bd, cwd: &Path, state: &Path, out: &mut Out
             Ok(report) => out.report(repo, &report),
             Err(e) => out.fail(e.stage(), Some(&repo.root), e),
         }
+    };
+    if let Some(pulled) = pulled {
+        for repo in &pulled {
+            sync_one(repo, out);
+        }
+        return;
     }
+    let mut synced: Vec<&Path> = Vec::new();
+    for target in &repos {
+        let repo = match groups.of_target(bd, target) {
+            Ok(Some(group)) => {
+                if synced.contains(&group.database.as_path()) {
+                    continue;
+                }
+                synced.push(&group.database);
+                group.representative(Some(target))
+            }
+            Ok(None) => target,
+            Err(e) => {
+                out.fail(Stage::Config, Some(&target.root), e);
+                continue;
+            }
+        };
+        sync_one(repo, out);
+    }
+}
+
+/// Reports the resolved repos `groups` could not place, then pulls each
+/// group once, in its first resolved member. Returns the members whose
+/// pull succeeded.
+fn pull(bd: &Bd, groups: &Groups, repos: &[Repo], out: &mut Out) -> Vec<Repo> {
+    let resolved = |root: &Path| repos.iter().any(|r| r.root == root);
+    for ungrouped in &groups.ungrouped {
+        if let (Some(repo), Some(e)) = (&ungrouped.repo, &ungrouped.error)
+            && resolved(&repo.root)
+        {
+            out.fail(Stage::Config, Some(&repo.root), e);
+        }
+    }
+    let mut pulled = Vec::new();
+    for group in &groups.groups {
+        let Some(member) = group.members.iter().find(|m| resolved(&m.root)) else {
+            continue;
+        };
+        match bd.run(&member.root, &["dolt", "pull"]) {
+            Ok(_) => pulled.push(member.clone()),
+            Err(e) => out.fail(Stage::Pull, Some(&member.root), e),
+        }
+    }
+    pulled
 }
 
 /// The repos `targets` name, each main checkout once, in order.

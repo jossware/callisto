@@ -106,6 +106,10 @@ impl Groups {
         if let Some(i) = self.index_of_member(&repo.root) {
             return Some(i);
         }
+        let failed = |u: &Ungrouped| u.repo.as_ref().is_some_and(|r| r.root == repo.root);
+        if self.ungrouped.iter().any(failed) {
+            return None;
+        }
         let database = match database(bd, &repo) {
             Ok(d) => d,
             Err(e) => {

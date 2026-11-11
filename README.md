@@ -127,9 +127,15 @@ Warnings go to stderr. Exits non-zero if any repo failed.
 
 ### `callisto sync --all`
 
-Runs `bd dolt pull` in every configured repo, then syncs them. A repo
-whose pull fails is logged and skipped; the others still sync. This is
-what the scheduled job runs.
+Runs `bd dolt pull` once per beads database the configured repos use,
+then syncs them. Repos that share a database, through a `.beads/`
+redirect, sync together, once, under the first such repo listed. A
+database whose pull fails is logged and skipped; the others still sync.
+This is what the scheduled job runs.
+
+`callisto sync` and the hook treat a shared database the same way. A
+checkout outside `repos` whose database a configured repo uses syncs
+as that repo.
 
 ### `callisto hook`
 
