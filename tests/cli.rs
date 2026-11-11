@@ -841,7 +841,12 @@ fn named_repos_in_one_group_sync_once() {
     sb.config(&["a", "b"]);
     let out = sb.run(&sb.path("repos"), &["sync", "a", "b"]);
     assert_eq!(out.code, Some(0), "{}", out.stderr);
-    assert_eq!(out.stdout.lines().count(), 1, "{}", out.stdout);
+    assert_eq!(
+        out.stdout,
+        "a: 1 created, 0 updated, 0 removed, 0 unchanged\n"
+    );
+    let b = sb.calls("b").unwrap_or_default();
+    assert!(!b.contains("export"), "{b}");
 }
 
 #[test]
@@ -909,4 +914,62 @@ fn hook_calls_context_once_per_repo() {
     assert_quiet_exit(&out);
     let calls = sb.calls("a").unwrap();
     assert_eq!(calls.matches("context").count(), 1, "{calls}");
+}
+
+#[test]
+fn all_failed_pull_in_shared_group_logs_once() {
+    let sb = Sandbox::new();
+    sb.repo("a", "a", &[("a-1", "first")]);
+    sb.repo("b", "b", &[]);
+    sb.share("b", "a");
+    sb.flag("a", "pull-fails");
+    sb.config(&["a", "b"]);
+    let out = sb.run(&sb.path("home"), &["sync", "--all"]);
+    assert_eq!(out.code, Some(1));
+    let log = sb.log();
+    assert_eq!(log.len(), 1, "{log:?}");
+    assert_eq!(log[0]["stage"], "pull");
+    assert!(ends_with(&log[0], "repo", "repos/a"), "{log:?}");
+}
+
+#[test]
+fn all_pulls_a_group_through_its_first_resolved_member() {
+    let sb = Sandbox::new();
+    sb.repo("a", "a", &[("a-1", "first")]);
+    sb.repo("b", "b", &[]);
+    sb.share("b", "a");
+    sb.config(&["a/missing", "b"]);
+    let out = sb.run(&sb.path("home"), &["sync", "--all"]);
+    assert_eq!(out.code, Some(1));
+    assert!(out.stderr.contains("no such directory"), "{}", out.stderr);
+    assert_eq!(
+        out.stdout,
+        "b: 1 created, 0 updated, 0 removed, 0 unchanged\n"
+    );
+    let a = sb.calls("a").unwrap_or_default();
+    assert!(!a.contains("dolt pull"), "{a}");
+    let b = sb.calls("b").unwrap();
+    assert_eq!(b.matches("dolt pull").count(), 1, "{b}");
+    assert!(sb.note("Projects/b/first - a-1.md"));
+}
+
+#[test]
+fn all_syncs_a_repo_reached_only_through_a_symlink() {
+    let sb = Sandbox::new();
+    sb.repo("a", "a", &[("a-1", "first")]);
+    sb.repo("b", "b", &[("b-1", "second")]);
+    let link = sb.path("home/x");
+    std::os::unix::fs::symlink(sb.path("repos/b/sub"), &link).unwrap();
+    sb.config(&["a"]);
+    let file = sb.path("config/callisto/config.toml");
+    let text = fs::read_to_string(&file)
+        .unwrap()
+        .replace("]\n", &format!(", {:?}]\n", link.display().to_string()));
+    fs::write(&file, text).unwrap();
+    let out = sb.run(&sb.path("home"), &["sync", "--all"]);
+    assert_eq!(out.code, Some(0), "{}", out.stderr);
+    let b = sb.calls("b").unwrap();
+    assert_eq!(b.matches("dolt pull").count(), 1, "{b}");
+    assert!(sb.note("Projects/b/second - b-1.md"));
+    assert!(out.stdout.contains("b: 1 created"), "{}", out.stdout);
 }
