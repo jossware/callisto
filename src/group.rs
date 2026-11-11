@@ -129,7 +129,7 @@ impl Groups {
     pub fn derive(bd: &Bd, entries: &[RepoEntry]) -> Groups {
         let mut g = Groups::default();
         for entry in entries {
-            let placed = g.place(bd, entry.path()).map(|(i, repo)| {
+            let placed = g.place(bd, &lookup_path(entry)).map(|(i, repo)| {
                 let entries = &mut g.groups[i].entries;
                 entries.push(Placed {
                     repo,
@@ -199,6 +199,13 @@ impl Groups {
             .map_or_else(|| "not in a repository".to_string(), ToString::to_string)
     }
 
+    /// Whether `entry`, one of the configured entries, joined a group.
+    pub fn placed(&self, entry: &RepoEntry) -> bool {
+        self.configured
+            .iter()
+            .any(|(e, placed)| e == entry && placed.is_some())
+    }
+
     pub fn read_prefixes(&mut self, bd: &Bd) {
         for group in &mut self.groups {
             group.prefix = bd
@@ -218,7 +225,7 @@ impl Groups {
                 continue;
             };
             let result = match *placed {
-                None => Err(self.unplaced_reason(&table.path)),
+                None => Err(self.unplaced_reason(&lookup_path(entry))),
                 Some((g, e)) => {
                     let group = &self.groups[g];
                     claim(group, &group.entries[e].repo, table, git).map(|c| claims[g].push(c))
@@ -345,5 +352,18 @@ fn ownership(entries: &[Placed], claims: Vec<Claim>) -> Ownership {
     match first.field.parse() {
         Ok(field) => Ownership::Field(FieldClaims { field, claims }),
         Err(e) => Ownership::Broken(e.to_string()),
+    }
+}
+
+/// Where to look for `entry`'s checkout. `locate` walks lexical
+/// ancestors, so a table path through a symlink would miss its checkout
+/// and never sync. Path entries keep the lexical walk; the sync command
+/// canonicalises them itself.
+fn lookup_path(entry: &RepoEntry) -> PathBuf {
+    match entry {
+        RepoEntry::Path(path) => path.clone(),
+        RepoEntry::Table(table) => {
+            fs::canonicalize(&table.path).unwrap_or_else(|_| table.path.clone())
+        }
     }
 }

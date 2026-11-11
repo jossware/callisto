@@ -1133,6 +1133,22 @@ fn rollout(sb: &Sandbox, a: &str, b: &str) {
     );
 }
 
+#[test]
+fn all_syncs_a_table_entry_reached_through_a_symlink() {
+    let sb = Sandbox::new();
+    rollout(&sb, "o/a", "o/b");
+    let link = sb.path("home/x");
+    std::os::unix::fs::symlink(sb.path("repos/b/sub"), &link).unwrap();
+    sb.config_text(&format!(
+        "field = \"metadata.repo\"\nrepos = [{{ path = {}, value = \"o/a\" }}, {{ path = {:?}, value = \"o/b\", project = \"b\" }}]\n",
+        sb.toml_path("a"),
+        link.display().to_string()
+    ));
+    let out = sb.run(&sb.path("home"), &["sync", "--all"]);
+    assert_rollout_filed(&sb, &out);
+    assert!(!out.stderr.contains("unresolvable"), "{}", out.stderr);
+}
+
 fn assert_rollout_filed(sb: &Sandbox, out: &Run) {
     assert_eq!(out.code, Some(0), "{}", out.stderr);
     assert!(sb.note("Projects/a/first - w-1.md"), "{}", out.stderr);

@@ -264,9 +264,7 @@ fn all_targets(config: &Config, groups: &Groups) -> Vec<PathBuf> {
         .iter()
         .filter(|entry| match entry {
             RepoEntry::Path(_) => true,
-            RepoEntry::Table(table) => {
-                repo::locate(&table.path).is_some_and(|repo| groups.of_member(&repo.root).is_some())
-            }
+            RepoEntry::Table(_) => groups.placed(entry),
         })
         .map(|entry| entry.path().to_path_buf())
         .collect()
