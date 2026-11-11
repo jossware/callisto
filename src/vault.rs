@@ -228,7 +228,7 @@ pub fn own_index(path: &Path, prefix: &str) -> io::Result<bool> {
     };
     let found = fields::read(&text);
     Ok(found.generated_by.as_deref() == Some(MARKER_VALUE)
-        && found.beads.is_empty()
+        && !found.bead_key
         && found.bead_prefix.as_deref() == Some(prefix))
 }
 
@@ -519,6 +519,24 @@ mod tests {
         assert!(!own(root, "unmarked.md"));
         assert!(!own(root, "bead.md"));
         assert!(!own(root, "other.md"));
+    }
+
+    #[test]
+    fn own_index_is_never_a_note_with_an_empty_bead_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for (name, bead) in [
+            ("bare.md", "bead:"),
+            ("list.md", "bead: []"),
+            ("quoted.md", "bead: \"\""),
+        ] {
+            put(
+                root,
+                name,
+                &format!("---\n{bead}\ngeneratedBy: callisto\nbeadPrefix: zz\n---\n"),
+            );
+            assert!(!own(root, name), "{bead}");
+        }
     }
 
     #[test]

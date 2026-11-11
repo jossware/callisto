@@ -6,6 +6,8 @@
 #[derive(Debug, Default, PartialEq)]
 pub struct Fields {
     pub beads: Vec<String>,
+    /// A `bead:` key, even with no ids, marks a note as a bead's.
+    pub bead_key: bool,
     /// `type:`.
     pub kind: Option<String>,
     pub generated_by: Option<String>,
@@ -44,6 +46,7 @@ fn fields(block: &[&str]) -> Fields {
         match key {
             "bead" if !bead => {
                 bead = true;
+                found.bead_key = true;
                 found.beads = if raw.is_empty() {
                     block_list(&block[n + 1..])
                 } else if let Some(inner) = raw.strip_prefix('[').and_then(|r| r.strip_suffix(']'))
@@ -148,6 +151,7 @@ mod tests {
             read("---\nbead: fx-dg4\ntype: task\n---\nbody\n"),
             Fields {
                 beads: vec!["fx-dg4".into()],
+                bead_key: true,
                 kind: Some("task".into()),
                 generated_by: None,
                 bead_prefix: None,
@@ -212,6 +216,7 @@ mod tests {
             ),
             Fields {
                 beads: vec!["a-1".into()],
+                bead_key: true,
                 kind: Some("task".into()),
                 generated_by: Some("callisto".into()),
                 bead_prefix: None,
