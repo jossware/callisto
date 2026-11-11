@@ -1,5 +1,6 @@
 pub mod bd;
 pub mod bead;
+pub mod claim;
 pub mod cli;
 pub mod cmd;
 pub mod config;
@@ -13,6 +14,7 @@ pub mod group;
 pub mod lock;
 pub mod paths;
 pub mod project;
+pub mod remote;
 pub mod removed;
 pub mod render;
 pub mod repo;

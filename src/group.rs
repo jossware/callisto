@@ -10,7 +10,11 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::bd::{Bd, BdError};
+use crate::config::{RepoEntry, TableEntry};
+use crate::field_path::FieldPath;
+use crate::remote::Git;
 use crate::repo::{self, PREFIX_KEY, Repo};
+use crate::standing::Condition;
 use crate::sync::Scope;
 
 #[derive(Debug)]
@@ -54,6 +58,40 @@ pub struct Group {
     /// In config order, each root once.
     pub members: Vec<Repo>,
     pub prefix: Option<String>,
+    /// In config order; a root repeats when two entries name it.
+    pub entries: Vec<Placed>,
+    pub ownership: Ownership,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Placed {
+    pub repo: Repo,
+    pub entry: RepoEntry,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Claim {
+    pub values: Vec<String>,
+    pub project: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FieldClaims {
+    pub field: FieldPath,
+    pub claims: Vec<Claim>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Ownership {
+    Prefix,
+    Field(FieldClaims),
+    Broken(String),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Unresolvable {
+    pub path: PathBuf,
+    pub reason: String,
 }
 
 impl Group {
@@ -80,21 +118,31 @@ pub struct Ungrouped {
 pub struct Groups {
     pub groups: Vec<Group>,
     pub ungrouped: Vec<Ungrouped>,
-    /// Each configured path, with the index of its group.
-    configured: Vec<(PathBuf, Option<usize>)>,
+    /// In config order.
+    pub unresolvable: Vec<Unresolvable>,
+    /// Each configured entry, with the indexes of its group and of its
+    /// place in that group's entries.
+    configured: Vec<(RepoEntry, Option<(usize, usize)>)>,
 }
 
 impl Groups {
-    pub fn derive(bd: &Bd, paths: &[PathBuf]) -> Groups {
+    pub fn derive(bd: &Bd, entries: &[RepoEntry]) -> Groups {
         let mut g = Groups::default();
-        for path in paths {
-            let index = g.place(bd, path);
-            g.configured.push((path.clone(), index));
+        for entry in entries {
+            let placed = g.place(bd, &lookup_path(entry)).map(|(i, repo)| {
+                let entries = &mut g.groups[i].entries;
+                entries.push(Placed {
+                    repo,
+                    entry: entry.clone(),
+                });
+                (i, entries.len() - 1)
+            });
+            g.configured.push((entry.clone(), placed));
         }
         g
     }
 
-    fn place(&mut self, bd: &Bd, path: &Path) -> Option<usize> {
+    fn place(&mut self, bd: &Bd, path: &Path) -> Option<(usize, Repo)> {
         let Some(repo) = repo::locate(path) else {
             self.ungrouped.push(Ungrouped {
                 path: path.to_path_buf(),
@@ -104,7 +152,7 @@ impl Groups {
             return None;
         };
         if let Some(i) = self.index_of_member(&repo.root) {
-            return Some(i);
+            return Some((i, repo));
         }
         let failed = |u: &Ungrouped| u.repo.as_ref().is_some_and(|r| r.root == repo.root);
         if self.ungrouped.iter().any(failed) {
@@ -123,18 +171,39 @@ impl Groups {
         };
         match self.groups.iter().position(|g| g.database == database) {
             Some(i) => {
-                self.groups[i].members.push(repo);
-                Some(i)
+                self.groups[i].members.push(repo.clone());
+                Some((i, repo))
             }
             None => {
                 self.groups.push(Group {
                     database,
-                    members: vec![repo],
+                    members: vec![repo.clone()],
                     prefix: None,
+                    entries: Vec::new(),
+                    ownership: Ownership::Prefix,
                 });
-                Some(self.groups.len() - 1)
+                Some((self.groups.len() - 1, repo))
             }
         }
+    }
+
+    /// Why `path`, which belongs to no group, could not be placed.
+    fn unplaced_reason(&self, path: &Path) -> String {
+        let Some(repo) = repo::locate(path) else {
+            return "not in a repository".to_string();
+        };
+        self.ungrouped
+            .iter()
+            .find(|u| u.repo.as_ref().is_some_and(|r| r.root == repo.root))
+            .and_then(|u| u.error.as_ref())
+            .map_or_else(|| "not in a repository".to_string(), ToString::to_string)
+    }
+
+    /// Whether `entry`, one of the configured entries, joined a group.
+    pub fn placed(&self, entry: &RepoEntry) -> bool {
+        self.configured
+            .iter()
+            .any(|(e, placed)| e == entry && placed.is_some())
     }
 
     pub fn read_prefixes(&mut self, bd: &Bd) {
@@ -146,6 +215,49 @@ impl Groups {
         }
     }
 
+    /// Defaults each table entry's value and project, and sets each
+    /// group's ownership. Runs after `read_prefixes`.
+    pub fn resolve(&mut self, git: &Git) {
+        let mut unresolvable = Vec::new();
+        let mut claims = vec![Vec::new(); self.groups.len()];
+        for (entry, placed) in &self.configured {
+            let RepoEntry::Table(table) = entry else {
+                continue;
+            };
+            let result = match *placed {
+                None => Err(self.unplaced_reason(&lookup_path(entry))),
+                Some((g, e)) => {
+                    let group = &self.groups[g];
+                    claim(group, &group.entries[e].repo, table, git).map(|c| claims[g].push(c))
+                }
+            };
+            if let Err(reason) = result {
+                unresolvable.push(Unresolvable {
+                    path: table.path.clone(),
+                    reason,
+                });
+            }
+        }
+        for (group, claims) in self.groups.iter_mut().zip(claims) {
+            group.ownership = ownership(&group.entries, claims);
+        }
+        self.unresolvable = unresolvable;
+    }
+
+    pub fn degraded(&self) -> bool {
+        !self.unresolvable.is_empty()
+    }
+
+    pub fn conditions(&self) -> Vec<Condition> {
+        self.unresolvable
+            .iter()
+            .map(|u| Condition::Unresolvable {
+                path: u.path.clone(),
+                reason: u.reason.clone(),
+            })
+            .collect()
+    }
+
     pub fn scope(&self) -> Scope {
         let prefixes = self
             .groups
@@ -155,8 +267,17 @@ impl Groups {
         let unreadable = self
             .configured
             .iter()
-            .filter(|(_, index)| index.is_none_or(|i| self.groups[i].prefix.is_none()))
-            .map(|(path, _)| path.clone())
+            .filter(|(entry, placed)| {
+                let prefixless = |(g, _): (usize, usize)| self.groups[g].prefix.is_none();
+                match entry {
+                    RepoEntry::Path(_) => placed.is_none_or(prefixless),
+                    // Only a failed prefix read could let this run claim
+                    // another group's notes. An unplaced entry is reported
+                    // as unresolvable instead.
+                    RepoEntry::Table(_) => placed.is_some_and(prefixless),
+                }
+            })
+            .map(|(entry, _)| entry.path().to_path_buf())
             .collect();
         Scope {
             prefixes,
@@ -181,5 +302,68 @@ impl Groups {
         }
         let database = database(bd, target)?;
         Ok(self.groups.iter().find(|g| g.database == database))
+    }
+}
+
+fn claim(group: &Group, repo: &Repo, table: &TableEntry, git: &Git) -> Result<Claim, String> {
+    if group.prefix.is_none() {
+        return Err("cannot read the issue prefix".to_string());
+    }
+    let values = match &table.value {
+        Some(values) => values.clone(),
+        None => vec![git.origin(&repo.root).map_err(|e| e.to_string())?],
+    };
+    let project = table.project.clone().unwrap_or_else(|| repo.name.clone());
+    Ok(Claim { values, project })
+}
+
+fn ownership(entries: &[Placed], claims: Vec<Claim>) -> Ownership {
+    let tables: Vec<(&Repo, &TableEntry)> = entries
+        .iter()
+        .filter_map(|p| match &p.entry {
+            RepoEntry::Table(t) => Some((&p.repo, t)),
+            RepoEntry::Path(_) => None,
+        })
+        .collect();
+    let Some((_, first)) = tables.first() else {
+        return Ownership::Prefix;
+    };
+    if tables.len() < entries.len() {
+        return Ownership::Broken("path and table entries share one database".to_string());
+    }
+    if let Some((_, other)) = tables.iter().find(|(_, t)| t.field != first.field) {
+        return Ownership::Broken(format!(
+            "table entries use different fields ({}, {})",
+            first.field, other.field
+        ));
+    }
+    for (i, (repo, _)) in tables.iter().enumerate() {
+        if tables[..i].iter().any(|(r, _)| r.root == repo.root) {
+            return Ownership::Broken(format!("{} is listed twice", repo.root.display()));
+        }
+    }
+    let mut seen: Vec<&str> = Vec::new();
+    for claim in &claims {
+        if let Some(v) = claim.values.iter().find(|v| seen.contains(&v.as_str())) {
+            return Ownership::Broken(format!("value \"{v}\" is claimed by more than one entry"));
+        }
+        seen.extend(claim.values.iter().map(String::as_str));
+    }
+    match first.field.parse() {
+        Ok(field) => Ownership::Field(FieldClaims { field, claims }),
+        Err(e) => Ownership::Broken(e.to_string()),
+    }
+}
+
+/// Where to look for `entry`'s checkout. `locate` walks lexical
+/// ancestors, so a table path through a symlink would miss its checkout
+/// and never sync. Path entries keep the lexical walk; the sync command
+/// canonicalises them itself.
+fn lookup_path(entry: &RepoEntry) -> PathBuf {
+    match entry {
+        RepoEntry::Path(path) => path.clone(),
+        RepoEntry::Table(table) => {
+            fs::canonicalize(&table.path).unwrap_or_else(|_| table.path.clone())
+        }
     }
 }

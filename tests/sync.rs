@@ -10,9 +10,12 @@ use jiff::tz::{Offset, TimeZone};
 use tempfile::TempDir;
 
 use callisto::bd::Bd;
+use callisto::claim::{Reason, Unclaimed};
 use callisto::errlog::Stage;
+use callisto::group::{Claim, FieldClaims};
 use callisto::lock;
 use callisto::repo::{self, Repo};
+use callisto::standing::Condition;
 use callisto::sync::{self, Report, Request, Scope, Warning};
 
 mod common;
@@ -120,6 +123,20 @@ impl Fixture {
     }
 
     fn run_repo(&self, repo: &Repo, scope: &Scope) -> Result<Report, sync::Error> {
+        self.run_request(repo, scope, None, false)
+    }
+
+    fn run_claims(&self, claims: &FieldClaims, degraded: bool) -> Result<Report, sync::Error> {
+        self.run_request(&self.repo, &self.scope(), Some(claims), degraded)
+    }
+
+    fn run_request(
+        &self,
+        repo: &Repo,
+        scope: &Scope,
+        claims: Option<&FieldClaims>,
+        degraded: bool,
+    ) -> Result<Report, sync::Error> {
         let lock = lock::acquire(&self.tmp.path().join("state/sync.lock")).unwrap();
         let tz = TimeZone::fixed(Offset::constant(-4));
         sync::sync_repo(
@@ -130,6 +147,8 @@ impl Fixture {
                 repo,
                 scope,
                 tz: &tz,
+                claims,
+                degraded,
             },
         )
     }
@@ -301,13 +320,22 @@ fn child_of_first(f: &Fixture) {
 const CHILD: &str = "Projects/a/b - a-2.md";
 
 fn assert_links_show_id(text: &str) {
-    assert!(!text.contains("first - a-1"), "{text}");
+    assert_links_show(text, "a-1");
+}
+
+/// `text` names its parent and blocker, bead `id` titled "first", by
+/// id alone.
+fn assert_links_show(text: &str, id: &str) {
+    assert!(!text.contains(&format!("first - {id}")), "{text}");
     assert!(
         !text.contains("\nparent:") && !text.contains("\nblockedBy:"),
         "{text}"
     );
-    assert!(text.contains("> | Parent | ○ a-1 |"), "{text}");
-    assert!(text.contains("> | Depends on | ○ a-1 |"), "{text}");
+    assert!(text.contains(&format!("> | Parent | ○ {id} |")), "{text}");
+    assert!(
+        text.contains(&format!("> | Depends on | ○ {id} |")),
+        "{text}"
+    );
 }
 
 #[test]
@@ -752,4 +780,227 @@ fn legacy_overlap_heals_after_one_rewrite() {
     assert!(!healed.contains("beadRemoved"), "{healed}");
     assert!(f.run().unwrap().removed.is_empty());
     assert_eq!(f.read(THEIRS), healed);
+}
+
+/// `line`, carrying `metadata` when given.
+fn field_line(id: &str, title: &str, status: &str, metadata: Option<&str>) -> String {
+    let base = line(id, title, status);
+    match metadata {
+        Some(json) => format!(r#"{},"metadata":{json}}}"#, base.strip_suffix('}').unwrap()),
+        None => base,
+    }
+}
+
+fn claims(entries: &[(&[&str], &str)]) -> FieldClaims {
+    FieldClaims {
+        field: "metadata.repo".parse().unwrap(),
+        claims: entries
+            .iter()
+            .map(|(values, project)| Claim {
+                values: values.iter().map(|v| v.to_string()).collect(),
+                project: project.to_string(),
+            })
+            .collect(),
+    }
+}
+
+/// A checkout with prefix `zz`, and vault projects `A` and `B`.
+fn table() -> Fixture {
+    let f = fixture("zz", "repo");
+    put(&f.vault, "Projects/A/A.md", "# A\n");
+    put(&f.vault, "Projects/B/B.md", "# B\n");
+    f
+}
+
+fn a_and_b() -> FieldClaims {
+    claims(&[(&["o/a"], "A"), (&["o/b"], "B")])
+}
+
+const ONE: &str = "Projects/A/one - zz-1.md";
+const REPO_A: Option<&str> = Some(r#"{"repo":"o/a"}"#);
+
+#[test]
+fn claimed_beads_file_under_their_project() {
+    let f = table();
+    f.set_export(&[
+        field_line("zz-1", "one", "open", REPO_A),
+        field_line("zz-2", "two", "open", Some(r#"{"repo":"o/b"}"#)),
+    ]);
+    let report = f.run_claims(&a_and_b(), false).unwrap();
+    assert_eq!(report.created, paths(&[ONE, "Projects/B/two - zz-2.md"]));
+    let one = f.read(ONE);
+    assert!(one.contains("\nprojects:\n  - \"[[A]]\"\n"), "{one}");
+    let two = f.read("Projects/B/two - zz-2.md");
+    assert!(two.contains("\nprojects:\n  - \"[[B]]\"\n"), "{two}");
+    assert!(report.unclaimed.is_empty(), "{:?}", report.unclaimed);
+    assert!(report.conditions.is_empty(), "{:?}", report.conditions);
+}
+
+#[test]
+fn value_list_claims_old_name() {
+    let f = table();
+    f.set_export(&[field_line(
+        "zz-1",
+        "one",
+        "open",
+        Some(r#"{"repo":"o/b-old"}"#),
+    )]);
+    let report = f
+        .run_claims(&claims(&[(&["o/b", "o/b-old"], "B")]), false)
+        .unwrap();
+    assert_eq!(report.created, paths(&["Projects/B/one - zz-1.md"]));
+}
+
+#[test]
+fn unclaimed_bead_gets_no_note() {
+    let f = table();
+    f.set_export(&[field_line("zz-3", "three", "open", None)]);
+    let before = f.snapshot();
+    let report = f.run_claims(&a_and_b(), false).unwrap();
+    assert_eq!(f.snapshot(), before);
+    assert!(report.created.is_empty());
+    assert_eq!(
+        report.unclaimed,
+        [Unclaimed {
+            id: "zz-3".into(),
+            title: "three".into(),
+            status: "open".into(),
+            reason: Reason::NoField,
+        }]
+    );
+    assert_eq!(
+        report.conditions,
+        [Condition::Unclaimed {
+            ids: vec!["zz-3".into()]
+        }]
+    );
+}
+
+#[test]
+fn non_string_field_is_unclaimed() {
+    let f = table();
+    f.set_export(&[
+        field_line("zz-1", "one", "open", Some(r#"{"repo":7}"#)),
+        field_line("zz-2", "two", "open", Some(r#"{"repo":["o/a"]}"#)),
+    ]);
+    let before = f.snapshot();
+    let report = f.run_claims(&a_and_b(), false).unwrap();
+    assert_eq!(f.snapshot(), before);
+    let reasons: Vec<&Reason> = report.unclaimed.iter().map(|u| &u.reason).collect();
+    assert_eq!(
+        reasons,
+        [
+            &Reason::Value("7".into()),
+            &Reason::Value("[\"o/a\"]".into())
+        ]
+    );
+    assert_eq!(
+        report.conditions,
+        [Condition::Unclaimed {
+            ids: vec!["zz-1".into(), "zz-2".into()]
+        }]
+    );
+}
+
+#[test]
+fn missing_project_is_unclaimed() {
+    let f = table();
+    f.set_export(&[field_line("zz-1", "one", "open", REPO_A)]);
+    let before = f.snapshot();
+    let report = f.run_claims(&claims(&[(&["o/a"], "Gone")]), false).unwrap();
+    assert_eq!(f.snapshot(), before);
+    assert_eq!(
+        report.unclaimed[0].reason,
+        Reason::MissingProject("Gone".into())
+    );
+    assert_eq!(
+        report.conditions,
+        [Condition::MissingProject {
+            project: "Gone".into(),
+            ids: vec!["zz-1".into()]
+        }]
+    );
+    assert!(
+        !has_warning(&report, |w| matches!(w, Warning::Unmapped(_))),
+        "{:?}",
+        report.warnings
+    );
+}
+
+#[test]
+fn unclaimed_existing_note_is_left_alone() {
+    let f = table();
+    f.set_export(&[field_line("zz-1", "one", "open", REPO_A)]);
+    f.run_claims(&a_and_b(), false).unwrap();
+    let before = f.snapshot();
+    f.set_export(&[field_line(
+        "zz-1",
+        "renamed",
+        "open",
+        Some(r#"{"repo":"o/z"}"#),
+    )]);
+    let report = f.run_claims(&a_and_b(), false).unwrap();
+    assert_eq!(f.snapshot(), before);
+    assert!(report.removed.is_empty() && report.updated.is_empty());
+    assert_eq!(report.unclaimed[0].reason, Reason::Value("o/z".into()));
+}
+
+#[test]
+fn moved_claimed_note_updates_in_place() {
+    let f = table();
+    f.set_export(&[field_line("zz-1", "one", "open", REPO_A)]);
+    f.run_claims(&a_and_b(), false).unwrap();
+    fs::create_dir_all(f.vault.join("Archives")).unwrap();
+    fs::rename(f.vault.join(ONE), f.vault.join("Archives/one - zz-1.md")).unwrap();
+    f.set_export(&[field_line("zz-1", "renamed", "open", REPO_A)]);
+    let report = f.run_claims(&a_and_b(), false).unwrap();
+    assert_eq!(report.updated, paths(&["Archives/one - zz-1.md"]));
+    assert!(report.created.is_empty());
+    let names: Vec<_> = fs::read_dir(f.vault.join("Projects/A"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(names, ["A.md"]);
+}
+
+#[test]
+fn link_to_unclaimed_bead_shows_id() {
+    let f = table();
+    let deps = r#","dependencies":[{"issue_id":"zz-1","depends_on_id":"zz-2","type":"parent-child","created_at":"2026-10-11T02:21:06Z"},{"issue_id":"zz-1","depends_on_id":"zz-2","type":"blocks","created_at":"2026-10-11T02:21:06Z"}]}"#;
+    let child = field_line("zz-1", "one", "open", REPO_A);
+    let child = format!("{}{deps}", child.strip_suffix('}').unwrap());
+    f.set_export(&[child, field_line("zz-2", "first", "open", None)]);
+    let report = f.run_claims(&a_and_b(), false).unwrap();
+    assert_eq!(report.created, paths(&[ONE]));
+    assert_links_show(&f.read(ONE), "zz-2");
+}
+
+#[test]
+fn degraded_skips_removal() {
+    let f = table();
+    f.set_export(&[field_line("zz-1", "one", "open", REPO_A)]);
+    f.run_claims(&a_and_b(), false).unwrap();
+    f.set_export(&[]);
+    let before = f.snapshot();
+    let report = f.run_claims(&a_and_b(), true).unwrap();
+    assert_eq!(f.snapshot(), before);
+    assert!(report.removed.is_empty());
+    assert!(report.degraded);
+    assert!(
+        has_warning(&report, |w| matches!(w, Warning::Degraded)),
+        "{:?}",
+        report.warnings
+    );
+    let report = f.run_claims(&a_and_b(), false).unwrap();
+    assert_eq!(report.removed, paths(&[ONE]));
+    assert!(!report.degraded);
+}
+
+#[test]
+fn table_sync_ignores_project_override() {
+    let f = table();
+    fs::write(f.repo.root.join(".beads/project"), "A").unwrap();
+    f.set_export(&[field_line("zz-1", "one", "open", Some(r#"{"repo":"o/b"}"#))]);
+    let report = f.run_claims(&a_and_b(), false).unwrap();
+    assert_eq!(report.created, paths(&["Projects/B/one - zz-1.md"]));
 }

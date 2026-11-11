@@ -1,6 +1,6 @@
 //! Syncing one repo's beads into the vault.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -8,12 +8,15 @@ use std::path::{Path, PathBuf};
 use jiff::tz::TimeZone;
 
 use crate::bd::Bd;
+use crate::claim::{self, Unclaimed};
 use crate::errlog::Stage;
 use crate::export::{self, ExportError};
+use crate::field_path::FieldValue;
 use crate::filename;
 use crate::graph::Graph;
+use crate::group::FieldClaims;
 use crate::lock::Lock;
-use crate::project::{self, Unmapped};
+use crate::project::{self, Project, Unmapped};
 use crate::removed;
 use crate::render::{self, frontmatter::Context, link::Links};
 use crate::repo::{self, Repo, SettingsError};
@@ -36,6 +39,11 @@ pub struct Request<'a> {
     pub repo: &'a Repo,
     pub scope: &'a Scope,
     pub tz: &'a TimeZone,
+    /// `None` files every bead under the repo's own project.
+    pub claims: Option<&'a FieldClaims>,
+    /// Some table entry could not be resolved, so a bead missing from
+    /// this export may belong to that entry.
+    pub degraded: bool,
 }
 
 /// Paths are relative to the vault, in the order they were written.
@@ -47,6 +55,9 @@ pub struct Report {
     pub unchanged: usize,
     pub warnings: Vec<Warning>,
     pub conditions: Vec<Condition>,
+    /// Beads no table entry files, in export order.
+    pub unclaimed: Vec<Unclaimed>,
+    pub degraded: bool,
 }
 
 #[derive(Debug)]
@@ -76,6 +87,7 @@ pub enum Warning {
     ScopeIncomplete {
         repos: Vec<PathBuf>,
     },
+    Degraded,
 }
 
 impl fmt::Display for Warning {
@@ -124,6 +136,9 @@ impl fmt::Display for Warning {
                 "cannot read the prefix of {}; removed beads were not marked",
                 list(repos)
             ),
+            Warning::Degraded => {
+                f.write_str("a table entry is unresolvable; removed beads were not marked")
+            }
         }
     }
 }
@@ -191,12 +206,15 @@ pub fn sync_repo(_lock: &Lock, req: &Request) -> Result<Report, Error> {
     if !req.vault.is_dir() {
         return Err(Error::NoVault(req.vault.to_path_buf()));
     }
-    let project = match project::map(req.vault, req.repo, &settings) {
-        Ok(project) => project,
-        Err(unmapped) => {
-            report.warnings.push(Warning::Unmapped(unmapped));
-            return Ok(report);
-        }
+    let filer = match req.claims {
+        Some(claims) => Filer::Field(claims),
+        None => match project::map(req.vault, req.repo, &settings) {
+            Ok(project) => Filer::Repo(project),
+            Err(unmapped) => {
+                report.warnings.push(Warning::Unmapped(unmapped));
+                return Ok(report);
+            }
+        },
     };
     let prefix = settings.prefix;
     if !req.scope.prefixes.contains(&prefix) {
@@ -204,7 +222,9 @@ pub fn sync_repo(_lock: &Lock, req: &Request) -> Result<Report, Error> {
             prefix: prefix.clone(),
         });
     }
-    let export = export::export(req.bd, &req.repo.root).map_err(Error::Export)?;
+    let field = req.claims.map(|claims| &claims.field);
+    let mut export =
+        export::export_with_field(req.bd, &req.repo.root, field).map_err(Error::Export)?;
     let mut prefixes: Vec<&str> = req.scope.prefixes.iter().map(String::as_str).collect();
     prefixes.push(&prefix);
     let foreign = export
@@ -218,22 +238,32 @@ pub fn sync_repo(_lock: &Lock, req: &Request) -> Result<Report, Error> {
             prefix,
         });
     }
+    let fields = std::mem::take(&mut export.fields);
     let graph = Graph::new(export);
+    let filing = match filer {
+        Filer::Repo(project) => Filing::Repo(project),
+        Filer::Field(claims) => {
+            Filing::Claims(claim_beads(req, claims, &graph, &fields, &mut report))
+        }
+    };
     let index = Index::scan(req.vault).map_err(Error::Scan)?;
     // A folder no run writes to again would keep its leftover, and
     // Syncthing would copy it to every device.
     for rel in index.stale() {
         let _ = fs::remove_file(req.vault.join(rel));
     }
-    let links = Links::new(&index, taken(req.vault, project.folder(), &graph, &index));
-    let cx = Context {
-        graph: &graph,
-        links: &links,
-        project: &project.name,
-        prefix: &prefix,
-        tz: req.tz,
-    };
+    let links = Links::new(&index, hidden(req.vault, &filing, &graph, &index));
     for bead in graph.notes() {
+        let Some(project) = filing.project(&bead.id) else {
+            continue;
+        };
+        let cx = Context {
+            graph: &graph,
+            links: &links,
+            project: &project.name,
+            prefix: &prefix,
+            tz: req.tz,
+        };
         let text = render::note(bead, &cx);
         match index.generated(&bead.id) {
             Generated::One(note) => {
@@ -270,6 +300,10 @@ pub fn sync_repo(_lock: &Lock, req: &Request) -> Result<Report, Error> {
             }),
         }
     }
+    if req.claims.is_some() && req.degraded {
+        report.warnings.push(Warning::Degraded);
+        return Ok(report);
+    }
     if !req.scope.unreadable.is_empty() {
         report.warnings.push(Warning::ScopeIncomplete {
             repos: req.scope.unreadable.clone(),
@@ -287,16 +321,57 @@ pub fn sync_repo(_lock: &Lock, req: &Request) -> Result<Report, Error> {
     Ok(report)
 }
 
-/// Beads whose new note's filename is already held by a file callisto
-/// did not write. Linking such a bead by name would reach that file.
-fn taken(vault: &Path, folder: &Path, graph: &Graph, index: &Index) -> HashSet<String> {
+/// Who decides where this run files notes, known before the export.
+enum Filer<'a> {
+    Repo(Project),
+    Field(&'a FieldClaims),
+}
+
+enum Filing {
+    Repo(Project),
+    /// Only claimed beads appear; the rest get no note.
+    Claims(HashMap<String, Project>),
+}
+
+impl Filing {
+    fn project(&self, id: &str) -> Option<&Project> {
+        match self {
+            Filing::Repo(project) => Some(project),
+            Filing::Claims(filed) => filed.get(id),
+        }
+    }
+}
+
+fn claim_beads(
+    req: &Request,
+    claims: &FieldClaims,
+    graph: &Graph,
+    fields: &HashMap<String, FieldValue>,
+    report: &mut Report,
+) -> HashMap<String, Project> {
+    let partition = claim::partition(req.vault, graph.notes(), fields, &claims.claims);
+    report
+        .conditions
+        .extend(claim::conditions(&partition.unclaimed));
+    report.unclaimed = partition.unclaimed;
+    report.degraded = req.degraded;
+    partition.filed
+}
+
+/// Beads without a note that links must show by id alone: their new
+/// note's filename is held by a file callisto did not write, or this
+/// run writes no note for them.
+fn hidden(vault: &Path, filing: &Filing, graph: &Graph, index: &Index) -> HashSet<String> {
     graph
         .notes()
         .iter()
         .filter(|b| index.generated(&b.id) == Generated::Missing)
-        .filter(|b| {
-            let rel = folder.join(filename::filename(&b.title, &b.id));
-            fs::symlink_metadata(vault.join(rel)).is_ok()
+        .filter(|b| match filing.project(&b.id) {
+            Some(project) => {
+                let rel = project.folder().join(filename::filename(&b.title, &b.id));
+                fs::symlink_metadata(vault.join(rel)).is_ok()
+            }
+            None => true,
         })
         .map(|b| b.id.clone())
         .collect()
