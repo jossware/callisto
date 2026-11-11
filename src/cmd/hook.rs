@@ -16,6 +16,7 @@ use serde_json::Value;
 use crate::bd::Bd;
 use crate::config::{self, Config, VaultError};
 use crate::errlog::{self, Entry, Stage};
+use crate::group::Groups;
 use crate::lock;
 use crate::paths::{self, Env};
 use crate::repo;
@@ -98,7 +99,9 @@ pub fn run(vault: Option<&Path>, env: &Env, bd: &Bd, stdin: &mut dyn Read, err: 
         Err(lock::Error::Locked) => return,
         Err(e) => return fail(env, root, Stage::Lock, e.to_string(), err),
     };
-    let scope = sync::scope(bd, &config.repos);
+    let mut groups = Groups::derive(bd, &config.repos);
+    groups.read_prefixes(bd);
+    let scope = groups.scope();
     let req = Request {
         bd,
         vault: &vault,

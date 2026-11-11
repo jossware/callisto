@@ -8,6 +8,7 @@ pub mod export;
 pub mod fields;
 pub mod filename;
 pub mod graph;
+pub mod group;
 pub mod lock;
 pub mod paths;
 pub mod project;

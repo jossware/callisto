@@ -20,6 +20,7 @@ const BIN: &str = env!("CARGO_BIN_EXE_callisto");
 const FAKE_BD: &str = r#"#!/bin/sh
 echo "$*" >> .beads/calls
 case "$1" in
+context) printf '{"beads_dir":"%s"}\n' "$PWD/.beads" ;;
 export)
   [ -e .beads/export-fails ] && { echo 'no database' >&2; exit 1; }
   while IFS= read -r l; do printf '%s\n' "$l"; done < .beads/export.jsonl ;;

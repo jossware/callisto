@@ -16,7 +16,7 @@ use crate::lock::Lock;
 use crate::project::{self, Unmapped};
 use crate::removed;
 use crate::render::{self, frontmatter::Context, link::Links};
-use crate::repo::{self, PREFIX_KEY, Repo, SettingsError};
+use crate::repo::{self, Repo, SettingsError};
 use crate::vault::{Generated, Index, ScanError, owner};
 use crate::write;
 
@@ -27,18 +27,6 @@ pub struct Scope {
     pub prefixes: Vec<String>,
     /// Configured repos whose prefix could not be read.
     pub unreadable: Vec<PathBuf>,
-}
-
-pub fn scope(bd: &Bd, repos: &[PathBuf]) -> Scope {
-    let mut scope = Scope::default();
-    for path in repos {
-        let prefix = repo::locate(path).and_then(|r| bd.config_get(&r.root, PREFIX_KEY).ok()?);
-        match prefix {
-            Some(p) => scope.prefixes.push(p),
-            None => scope.unreadable.push(path.clone()),
-        }
-    }
-    scope
 }
 
 pub struct Request<'a> {

@@ -10,6 +10,7 @@ use jiff::tz::TimeZone;
 use crate::bd::Bd;
 use crate::config::{self, Config, VaultError};
 use crate::errlog::{self, Entry, Stage};
+use crate::group::Groups;
 use crate::lock;
 use crate::paths::{self, Env};
 use crate::repo::{self, Repo};
@@ -151,7 +152,9 @@ fn sync(args: &Args, env: &Env, bd: &Bd, cwd: &Path, state: &Path, out: &mut Out
     if repos.is_empty() {
         return;
     }
-    let scope = sync::scope(bd, &config.repos);
+    let mut groups = Groups::derive(bd, &config.repos);
+    groups.read_prefixes(bd);
+    let scope = groups.scope();
     let tz = TimeZone::system();
     for repo in &repos {
         let req = Request {

@@ -458,17 +458,6 @@ fn unchecked_prefix_warns() {
     );
 }
 
-#[test]
-fn scope_reads_prefixes() {
-    let f = fixture("a", "a");
-    let b = checkout(f.tmp.path(), "b", "b");
-    let stray = f.tmp.path().join("stray");
-    fs::create_dir_all(&stray).unwrap();
-    let scope = sync::scope(&f.bd, &[f.repo.root.clone(), b, stray.clone()]);
-    assert_eq!(scope.prefixes, ["a", "b"]);
-    assert_eq!(scope.unreadable, [stray]);
-}
-
 fn has_warning(report: &Report, want: impl Fn(&Warning) -> bool) -> bool {
     report.warnings.iter().any(want)
 }
