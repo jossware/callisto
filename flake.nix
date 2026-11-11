@@ -44,6 +44,15 @@
       let
         pkgs = import nixpkgs { inherit system; };
         manifest = (pkgs.lib.importTOML ./Cargo.toml).package;
+        toml =
+          settings:
+          (tests.hmConfig {
+            inherit system;
+            settings = {
+              enable = true;
+            }
+            // settings;
+          }).xdg.configFile."callisto/config.toml".source;
       in
       {
         packages.default = pkgs.rustPlatform.buildRustPackage {
@@ -90,17 +99,6 @@
             throw "hm-module tests failed: ${builtins.toJSON tests.failures}";
 
         checks.config-toml =
-          let
-            toml =
-              settings:
-              (tests.hmConfig {
-                inherit system;
-                settings = {
-                  enable = true;
-                }
-                // settings;
-              }).xdg.configFile."callisto/config.toml".source;
-          in
           pkgs.runCommand "callisto-config-toml"
             {
               nativeBuildInputs = [ pkgs.python3 ];
@@ -126,6 +124,56 @@
               PY
               touch $out
             '';
+
+        # Runs here because the test needs the module's generated files.
+        checks.config-loader = self.packages.${system}.default.overrideAttrs {
+          pname = "callisto-config-loader";
+          CALLISTO_HM_CONFIG_DIR = pkgs.linkFarm "callisto-hm-configs" [
+            {
+              name = "mixed.toml";
+              path = toml {
+                vault = "~/org";
+                field = "metadata.repo";
+                unfiled = "Inbox/Beads";
+                repos = [
+                  "~/Workspaces/callisto"
+                  {
+                    path = "~/work/p";
+                    value = "github.com/o/p";
+                    project = "P";
+                  }
+                ];
+              };
+            }
+            {
+              name = "tables-only.toml";
+              path = toml {
+                vault = "~/org";
+                field = "metadata.repo";
+                repos = [
+                  {
+                    path = "/srv/q";
+                    field = "x.y";
+                    value = [
+                      "a"
+                      "b"
+                    ];
+                  }
+                  { path = "/srv/r"; }
+                  {
+                    path = "/srv/s";
+                    value = [ "one" ];
+                  }
+                ];
+              };
+            }
+          ];
+          cargoTestFlags = [
+            "--test"
+            "hm_config"
+          ];
+          checkFlags = [ "--ignored" ];
+        };
 
         checks.units =
           let
