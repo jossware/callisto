@@ -16,6 +16,7 @@ pub mod project;
 pub mod removed;
 pub mod render;
 pub mod repo;
+pub mod standing;
 pub mod sync;
 pub mod vault;
 pub mod write;

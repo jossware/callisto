@@ -973,3 +973,81 @@ fn all_syncs_a_repo_reached_only_through_a_symlink() {
     assert!(sb.note("Projects/b/second - b-1.md"));
     assert!(out.stdout.contains("b: 1 created"), "{}", out.stdout);
 }
+
+fn assert_no_standing_state(sb: &Sandbox) {
+    assert!(
+        !sb.path("state/callisto/conditions.json").exists(),
+        "conditions.json written"
+    );
+    assert!(sb.log().is_empty(), "{:?}", sb.log());
+}
+
+#[test]
+fn home_sync_writes_no_condition_state() {
+    let sb = Sandbox::new();
+    let repo = sb.repo("a", "a", &[("a-1", "first")]);
+    sb.config(&["a"]);
+    let all = sb.sync(sb.tmp.path(), &["--all"]);
+    assert_eq!(all.code, Some(0), "{}", all.stderr);
+    assert_eq!(
+        all.stdout,
+        "a: 1 created, 0 updated, 0 removed, 0 unchanged\n"
+    );
+    assert_eq!(all.stderr, "");
+    assert_no_standing_state(&sb);
+    let one = sb.sync(&repo, &[]);
+    assert_eq!(one.code, Some(0), "{}", one.stderr);
+    assert_eq!(
+        one.stdout,
+        "a: 0 created, 0 updated, 0 removed, 1 unchanged\n"
+    );
+    assert_eq!(one.stderr, "");
+    assert_no_standing_state(&sb);
+    let hook = sb.hook(&payload(&repo), &[], &[]);
+    assert_quiet_exit(&hook);
+    assert_no_standing_state(&sb);
+}
+
+#[test]
+fn unlisted_checkout_writes_no_state() {
+    let sb = Sandbox::new();
+    sb.repo("a", "a", &[("a-1", "first")]);
+    let c = sb.repo("c", "c", &[("c-1", "third")]);
+    sb.config(&["a"]);
+    let one = sb.sync(&c, &[]);
+    assert_eq!(one.code, Some(0), "{}", one.stderr);
+    assert_eq!(
+        one.stdout,
+        "c: 1 created, 0 updated, 0 removed, 0 unchanged\n"
+    );
+    assert_eq!(
+        one.stderr,
+        format!(
+            "callisto: {}: warning: prefix \"c\" is not in the configured repo list, so it is unchecked\n",
+            c.canonicalize().unwrap().display()
+        )
+    );
+    assert_no_standing_state(&sb);
+    let hook = sb.hook(&payload(&c), &[], &[]);
+    assert_quiet_exit(&hook);
+    assert_no_standing_state(&sb);
+}
+
+#[test]
+fn hook_context_failure_still_records_config() {
+    let sb = Sandbox::new();
+    sb.repo("a", "a", &[("a-1", "first")]);
+    let c = sb.repo("c", "c", &[("c-1", "third")]);
+    sb.flag("c", "context-fails");
+    sb.config(&["a"]);
+    fs::create_dir_all(sb.path("state/callisto")).unwrap();
+    fs::write(
+        sb.path("state/callisto/conditions.json"),
+        r#"{"config":"old"}"#,
+    )
+    .unwrap();
+    let out = sb.hook(&payload(&c), &[], &[]);
+    assert_quiet_exit(&out);
+    let stages: Vec<_> = sb.log().iter().map(|e| e["stage"].clone()).collect();
+    assert_eq!(stages, ["config", "conditions"], "{stages:?}");
+}

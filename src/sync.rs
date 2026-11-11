@@ -17,6 +17,7 @@ use crate::project::{self, Unmapped};
 use crate::removed;
 use crate::render::{self, frontmatter::Context, link::Links};
 use crate::repo::{self, Repo, SettingsError};
+use crate::standing::Condition;
 use crate::vault::{Generated, Index, ScanError, owner};
 use crate::write;
 
@@ -45,6 +46,7 @@ pub struct Report {
     pub removed: Vec<PathBuf>,
     pub unchanged: usize,
     pub warnings: Vec<Warning>,
+    pub conditions: Vec<Condition>,
 }
 
 #[derive(Debug)]

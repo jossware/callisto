@@ -59,6 +59,10 @@ pub fn error_log(state: &Path) -> PathBuf {
     state.join("errors.jsonl")
 }
 
+pub fn conditions_state(state: &Path) -> PathBuf {
+    state.join("conditions.json")
+}
+
 /// Expands a leading `~` to `home`. Codex may run the hook without a
 /// shell, and launchd and systemd never expand it. `None` means the path
 /// needs a home and there is none.
@@ -134,6 +138,10 @@ mod tests {
         let state = Path::new("/s/callisto");
         assert_eq!(sync_lock(state), Path::new("/s/callisto/sync.lock"));
         assert_eq!(error_log(state), Path::new("/s/callisto/errors.jsonl"));
+        assert_eq!(
+            conditions_state(state),
+            Path::new("/s/callisto/conditions.json")
+        );
     }
 
     #[test]

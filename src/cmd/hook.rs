@@ -20,6 +20,7 @@ use crate::group::Groups;
 use crate::lock;
 use crate::paths::{self, Env};
 use crate::repo;
+use crate::standing::{self, Subject, Summary};
 use crate::sync::{self, Request};
 
 /// The repo being synced: the panic hook's only view of the run.
@@ -101,10 +102,15 @@ pub fn run(vault: Option<&Path>, env: &Env, bd: &Bd, stdin: &mut dyn Read, err: 
     };
     let mut groups = Groups::derive(bd, &config.paths());
     groups.read_prefixes(bd);
-    let synced = match groups.of_target(bd, &repo) {
-        Ok(Some(group)) => group.representative(Some(&repo)),
-        Ok(None) => &repo,
-        Err(e) => return fail(env, root, Stage::Config, e.to_string(), err),
+    let mut summaries = vec![standing::config_summary()];
+    let (synced, subject) = match groups.of_target(bd, &repo) {
+        Ok(Some(group)) => (group.representative(Some(&repo)), Subject::group(group)),
+        Ok(None) => (&repo, Subject::Checkout(repo.root.clone())),
+        Err(e) => {
+            fail(env, root, Stage::Config, e.to_string(), err);
+            standing::record(&lock, state, "hook", &summaries);
+            return;
+        }
     };
     *REPO.lock().unwrap_or_else(|e| e.into_inner()) = Some(synced.root.clone());
     let scope = groups.scope();
@@ -116,9 +122,14 @@ pub fn run(vault: Option<&Path>, env: &Env, bd: &Bd, stdin: &mut dyn Read, err: 
         tz: &TimeZone::system(),
     };
     // Warnings are dropped: they recur every turn, and `sync` shows them.
-    if let Err(e) = sync::sync_repo(&lock, &req) {
-        fail(env, Some(&synced.root), e.stage(), e.to_string(), err);
+    match sync::sync_repo(&lock, &req) {
+        Ok(report) => summaries.push(Summary {
+            subject,
+            conditions: report.conditions,
+        }),
+        Err(e) => fail(env, Some(&synced.root), e.stage(), e.to_string(), err),
     }
+    standing::record(&lock, state, "hook", &summaries);
 }
 
 /// `hook` with arguments clap rejected. The harness settings own the
