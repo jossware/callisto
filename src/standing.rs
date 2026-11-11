@@ -241,21 +241,29 @@ fn record_to(state: &Path, command: &str, summaries: &[Summary], stderr: &mut dy
     for summary in summaries {
         let key = summary.subject.key();
         let text = summary.text();
-        let logged = if summary.conditions.is_empty() {
-            last.remove(&key).is_some()
-        } else if last.get(&key) != Some(&text) {
-            last.insert(key, text.clone());
-            true
+        let clear = summary.conditions.is_empty();
+        let due = if clear {
+            last.contains_key(&key)
         } else {
-            false
+            last.get(&key) != Some(&text)
         };
-        if logged {
-            let mut entry = Entry::new(Stage::Conditions, text);
-            entry.command = Some(command.to_string());
-            entry.repo = summary.subject.repo().map(Path::to_path_buf);
-            errlog::record(&paths::error_log(state), &entry);
-            changed = true;
+        if !due {
+            continue;
         }
+        let mut entry = Entry::new(Stage::Conditions, text.clone());
+        entry.command = Some(command.to_string());
+        entry.repo = summary.subject.repo().map(Path::to_path_buf);
+        // Saving a summary the log never got would hide it from every
+        // later run.
+        if !errlog::record_to(&paths::error_log(state), &entry, stderr) {
+            continue;
+        }
+        if clear {
+            last.remove(&key);
+        } else {
+            last.insert(key, text);
+        }
+        changed = true;
     }
     if changed && let Err(e) = write_state(state, &last) {
         // `eprintln!` panics on a closed stderr.
@@ -650,5 +658,26 @@ mod tests {
         let err = f.record(&[group("/r", &["a-1"])]);
         assert!(err.starts_with("callisto: couldn't write "), "{err}");
         assert_eq!(f.entries().len(), 1);
+    }
+
+    #[test]
+    fn failed_append_leaves_the_subject_as_saved() {
+        let f = Fixture::new();
+        f.record(&[group("/r", &["a-1"])]);
+        let before = f.saved();
+        let log = paths::error_log(f.state());
+        let kept = fs::read(&log).unwrap();
+        fs::remove_file(&log).unwrap();
+        fs::create_dir(&log).unwrap();
+        f.record(&[group("/r", &["a-2"])]);
+        assert_eq!(f.saved(), before);
+        f.record(&[group("/r", &[])]);
+        assert_eq!(f.saved(), before);
+        fs::remove_dir(&log).unwrap();
+        fs::write(&log, kept).unwrap();
+        f.record(&[group("/r", &["a-2"])]);
+        let entries = f.entries();
+        assert_eq!(entries.len(), 2);
+        assert!(entries[1].error.contains("a-2"), "{}", entries[1].error);
     }
 }
