@@ -129,21 +129,25 @@ impl Groups {
     pub fn derive(bd: &Bd, entries: &[RepoEntry]) -> Groups {
         let mut g = Groups::default();
         for entry in entries {
-            let placed = g.place(bd, &lookup_path(entry)).map(|(i, repo)| {
-                let entries = &mut g.groups[i].entries;
-                entries.push(Placed {
-                    repo,
-                    entry: entry.clone(),
+            let placed = g
+                .place(bd, entry.path(), &lookup_path(entry))
+                .map(|(i, repo)| {
+                    let entries = &mut g.groups[i].entries;
+                    entries.push(Placed {
+                        repo,
+                        entry: entry.clone(),
+                    });
+                    (i, entries.len() - 1)
                 });
-                (i, entries.len() - 1)
-            });
             g.configured.push((entry.clone(), placed));
         }
         g
     }
 
-    fn place(&mut self, bd: &Bd, path: &Path) -> Option<(usize, Repo)> {
-        let Some(repo) = repo::locate(path) else {
+    /// Places the checkout found from `lookup`, reporting failures
+    /// against `path` as configured.
+    fn place(&mut self, bd: &Bd, path: &Path, lookup: &Path) -> Option<(usize, Repo)> {
+        let Some(repo) = repo::locate(lookup) else {
             self.ungrouped.push(Ungrouped {
                 path: path.to_path_buf(),
                 repo: None,
@@ -365,14 +369,9 @@ fn ownership(entries: &[Placed], claims: Vec<Claim>, values: &[Vec<String>]) -> 
 }
 
 /// Where to look for `entry`'s checkout. `locate` walks lexical
-/// ancestors, so a table path through a symlink would miss its checkout
-/// and never sync. Path entries keep the lexical walk; the sync command
-/// canonicalises them itself.
+/// ancestors, so a path through a symlink would miss its checkout. A
+/// path entry missed that way would also escape the group rules.
 fn lookup_path(entry: &RepoEntry) -> PathBuf {
-    match entry {
-        RepoEntry::Path(path) => path.clone(),
-        RepoEntry::Table(table) => {
-            fs::canonicalize(&table.path).unwrap_or_else(|_| table.path.clone())
-        }
-    }
+    let path = entry.path();
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }

@@ -318,8 +318,8 @@ fn pull(bd: &Bd, groups: &Groups, repos: &[Repo], out: &mut Out) -> Vec<Repo> {
             pulled.push(member.clone());
         }
     }
-    // Grouping locates configured paths without following symlinks, so a
-    // resolved repo can be one it never placed.
+    // A resolved repo need not be configured, so grouping may never have
+    // placed it.
     for repo in repos {
         if groups.of_member(&repo.root).is_some() || errored(&repo.root) {
             continue;

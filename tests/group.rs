@@ -484,6 +484,24 @@ fn repeated_root_is_broken() {
 }
 
 #[test]
+fn mixed_group_through_a_symlinked_path_is_broken() {
+    let f = fixture();
+    let db = f.shared(Some("w"));
+    let a = f.redirected("a", &db);
+    let b = f.redirected("b", &db);
+    fs::create_dir_all(a.join("src")).unwrap();
+    let link = f.path("into-a");
+    symlink(a.join("src"), &link).unwrap();
+    let g = f.entries(&[RepoEntry::Path(link), table(&b, Some(&["o/b"]), None)]);
+    assert!(g.ungrouped.is_empty());
+    let reason = broken(&g.groups[0].ownership);
+    assert!(
+        reason.contains("path and table entries share one database"),
+        "{reason}"
+    );
+}
+
+#[test]
 fn shared_value_is_broken() {
     let f = fixture();
     let c = f.repo("c", "c");
