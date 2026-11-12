@@ -2,6 +2,7 @@ pub mod body;
 pub mod escape;
 pub mod frontmatter;
 pub mod link;
+pub mod unfiled;
 pub mod yaml;
 
 use crate::bead::Bead;

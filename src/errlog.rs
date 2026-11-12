@@ -31,6 +31,7 @@ pub enum Stage {
     Render,
     Write,
     Panic,
+    Conditions,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -88,7 +89,13 @@ fn io_at(path: &Path) -> impl FnOnce(io::Error) -> Failure + use<> {
 /// Appends `entry` to the log. Never panics or fails: a hook must not
 /// disturb the harness, so a failure goes to stderr and no further.
 pub fn record(log: &Path, entry: &Entry) {
-    record_within(log, entry, MAX_LEN, lock::TIMEOUT, &mut io::stderr());
+    record_to(log, entry, &mut io::stderr());
+}
+
+/// As `record`, with the fallback written to `stderr`. Returns whether
+/// the entry reached the log.
+pub fn record_to(log: &Path, entry: &Entry, stderr: &mut dyn Write) -> bool {
+    record_within(log, entry, MAX_LEN, lock::TIMEOUT, stderr)
 }
 
 fn record_within(
@@ -97,8 +104,9 @@ fn record_within(
     max_len: usize,
     timeout: Duration,
     stderr: &mut dyn Write,
-) {
-    if let Err(failure) = append(log, entry, max_len, timeout) {
+) -> bool {
+    let result = append(log, entry, max_len, timeout);
+    if let Err(failure) = &result {
         // `eprintln!` panics on a closed stderr.
         let _ = writeln!(
             stderr,
@@ -109,6 +117,7 @@ fn record_within(
             let _ = writeln!(stderr, "{json}");
         }
     }
+    result.is_ok()
 }
 
 fn append(log: &Path, entry: &Entry, max_len: usize, timeout: Duration) -> Result<(), Failure> {
@@ -276,6 +285,14 @@ mod tests {
         assert_eq!(value["stage"], "export");
         assert_eq!(value["repo"], serde_json::Value::Null);
         assert!(value["ts"].as_str().unwrap().ends_with('Z'));
+    }
+
+    #[test]
+    fn conditions_stage_serializes_lowercase() {
+        assert_eq!(
+            serde_json::to_string(&Stage::Conditions).unwrap(),
+            "\"conditions\""
+        );
     }
 
     // --- appending ---

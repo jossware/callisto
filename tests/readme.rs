@@ -3,13 +3,15 @@
 use std::fs;
 use std::path::Path;
 
-use callisto::config::Config;
+use callisto::config::{Config, RepoEntry};
 
 const OPTIONS: &[&str] = &[
     "enable",
     "package",
     "vault",
     "repos",
+    "field",
+    "unfiled",
     "path",
     "startInterval",
     "onCalendar",
@@ -19,21 +21,40 @@ fn readme() -> String {
     fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/README.md")).unwrap()
 }
 
-fn first_block(text: &str, fence: &str) -> String {
-    let mut lines = text.lines().skip_while(|l| *l != fence).skip(1);
-    let block: Vec<_> = lines.by_ref().take_while(|l| *l != "```").collect();
-    assert!(!block.is_empty(), "no {fence} block");
-    block.join("\n")
+/// Every ```toml block that is a callisto config. A `[features]`
+/// block is Codex's, which callisto does not read.
+fn config_blocks(text: &str) -> Vec<String> {
+    let mut blocks = Vec::new();
+    let mut lines = text.lines();
+    while lines.by_ref().any(|l| l == "```toml") {
+        let block: Vec<_> = lines.by_ref().take_while(|l| *l != "```").collect();
+        if !block.iter().any(|l| l.trim() == "[features]") {
+            blocks.push(block.join("\n"));
+        }
+    }
+    blocks
 }
 
 #[test]
-fn readme_config_example_loads() {
+fn readme_config_examples_load() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("config.toml");
-    fs::write(&file, first_block(&readme(), "```toml")).unwrap();
-    let config = Config::load(&file, Some(Path::new("/h"))).unwrap();
-    assert_eq!(config.vault, Some("/h/org".into()));
-    assert!(!config.repos.is_empty());
+    let blocks = config_blocks(&readme());
+    assert!(blocks.len() >= 2, "{} config blocks", blocks.len());
+    let mut configs = Vec::new();
+    for block in &blocks {
+        fs::write(&file, block).unwrap();
+        let config =
+            Config::load(&file, Some(Path::new("/h"))).unwrap_or_else(|e| panic!("{e}\n{block}"));
+        assert!(!config.repos.is_empty(), "no repos in\n{block}");
+        configs.push(config);
+    }
+    assert_eq!(configs[0].vault, Some("/h/org".into()));
+    let tables = configs
+        .iter()
+        .flat_map(|c| &c.repos)
+        .any(|r| matches!(r, RepoEntry::Table(_)));
+    assert!(tables, "no table example");
 }
 
 #[test]

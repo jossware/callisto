@@ -2,7 +2,7 @@ use std::error::Error;
 use std::ffi::OsString;
 use std::fmt;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 
 use serde::Deserialize;
@@ -125,6 +125,23 @@ impl Bd {
         let value = parsed.value.as_deref().map(str::trim).unwrap_or_default();
         Ok((!value.is_empty()).then(|| value.to_string()))
     }
+
+    /// Reads where bd keeps the database for `checkout`, following any
+    /// redirect.
+    pub fn context(&self, checkout: &Path) -> Result<Context, BdError> {
+        let args = ["context", "--json"];
+        let out = self.run(checkout, &args)?;
+        serde_json::from_str(&out).map_err(|source| BdError::Malformed {
+            args: args.join(" "),
+            source,
+        })
+    }
+}
+
+/// What `bd context` reports about a checkout.
+#[derive(Debug, Deserialize)]
+pub struct Context {
+    pub beads_dir: PathBuf,
 }
 
 #[derive(Deserialize)]
@@ -294,5 +311,41 @@ printf '{{"key":"%s","schema_version":1,"value":%s}}\n' "$4" '{value}'"#
             bd.run(tmp.path(), &["export"]),
             Err(BdError::NotUtf8 { .. })
         ));
+    }
+
+    #[test]
+    fn context_reads_beads_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bd = Bd::new(fake_bd(
+            tmp.path(),
+            r#"[ "$1 $2" = "context --json" ] || exit 9
+echo '{"backend":"dolt","beads_dir":"/x/.beads","is_redirected":true}'"#,
+        ));
+        let context = bd.context(tmp.path()).unwrap();
+        assert_eq!(context.beads_dir, PathBuf::from("/x/.beads"));
+    }
+
+    #[test]
+    fn context_without_beads_dir_is_malformed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bd = Bd::new(fake_bd(tmp.path(), r#"echo '{"backend":"dolt"}'"#));
+        let err = bd.context(tmp.path()).unwrap_err();
+        assert!(matches!(err, BdError::Malformed { .. }), "{err:?}");
+        assert!(err.to_string().contains("context --json"), "{err}");
+    }
+
+    #[test]
+    fn context_failure_keeps_stderr() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bd = Bd::new(fake_bd(
+            tmp.path(),
+            "echo 'no .beads directory found' >&2; exit 1",
+        ));
+        let err = bd.context(tmp.path()).unwrap_err();
+        assert!(matches!(err, BdError::Failed { .. }), "{err:?}");
+        assert!(
+            err.to_string().contains("no .beads directory found"),
+            "{err}"
+        );
     }
 }

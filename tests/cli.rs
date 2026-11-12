@@ -18,21 +18,33 @@ const BIN: &str = env!("CARGO_BIN_EXE_callisto");
 // Shell builtins only: PATH holds nothing but this script, as in the
 // Linux Nix build sandbox.
 const FAKE_BD: &str = r#"#!/bin/sh
+d="$PWD/.beads"
+[ -f .beads/redirect ] && read -r d < .beads/redirect
 echo "$*" >> .beads/calls
 case "$1" in
+context)
+  [ -e .beads/context-fails ] && { echo 'no .beads directory found' >&2; exit 1; }
+  printf '{"beads_dir":"%s"}\n' "$d" ;;
 export)
-  [ -e .beads/export-fails ] && { echo 'no database' >&2; exit 1; }
-  while IFS= read -r l; do printf '%s\n' "$l"; done < .beads/export.jsonl ;;
+  [ -e "$d/export-fails" ] && { echo 'no database' >&2; exit 1; }
+  while IFS= read -r l; do printf '%s\n' "$l"; done < "$d/export.jsonl" ;;
 config) case "$4" in
-  issue_prefix) read -r p < .beads/prefix
+  issue_prefix) read -r p < "$d/prefix"
     printf '{"key":"issue_prefix","value":"%s"}\n' "$p" ;;
   *) printf '{"key":"%s","value":""}\n' "$4" ;;
   esac ;;
 dolt)
-  [ -e .beads/pull-fails ] && { echo 'no remote' >&2; exit 1; }
+  [ -e "$d/pull-fails" ] && { echo 'no remote' >&2; exit 1; }
   exit 0 ;;
 *) exit 9 ;;
 esac
+"#;
+
+const FAKE_GIT: &str = r#"#!/bin/sh
+[ "$1" = -C ] || exit 9
+[ -f "$2/.git/origin" ] || { echo "error: No such remote 'origin'" >&2; exit 2; }
+read -r u < "$2/.git/origin"
+printf '%s\n' "$u"
 "#;
 
 struct Sandbox {
@@ -61,6 +73,18 @@ fn line(id: &str, title: &str) -> String {
     )
 }
 
+/// `line` with `metadata.repo` set to `repo`, when given.
+fn meta_line(id: &str, title: &str, repo: Option<&str>) -> String {
+    let line = line(id, title);
+    match repo {
+        Some(repo) => format!(
+            r#"{},"metadata":{{"repo":"{repo}"}}}}"#,
+            &line[..line.len() - 1]
+        ),
+        None => line,
+    }
+}
+
 impl Sandbox {
     fn new() -> Sandbox {
         let tmp = tempfile::tempdir().unwrap();
@@ -69,6 +93,7 @@ impl Sandbox {
         }
         let bd = tmp.path().join("bin/bd");
         common::write_script(&bd, FAKE_BD);
+        common::write_script(&tmp.path().join("bin/git"), FAKE_GIT);
         Sandbox { tmp }
     }
 
@@ -107,6 +132,13 @@ impl Sandbox {
         fs::write(self.path("repos").join(name).join(".beads").join(flag), "").unwrap();
     }
 
+    /// Points `repos/<name>` at the database of `repos/<with>`.
+    fn share(&self, name: &str, with: &str) {
+        let db = self.path("repos").join(with).join(".beads");
+        let redirect = self.path("repos").join(name).join(".beads/redirect");
+        fs::write(redirect, db.display().to_string()).unwrap();
+    }
+
     fn calls(&self, name: &str) -> Option<String> {
         fs::read_to_string(self.path("repos").join(name).join(".beads/calls")).ok()
     }
@@ -124,6 +156,30 @@ impl Sandbox {
             list.join(", ")
         );
         fs::write(dir.join("config.toml"), text).unwrap();
+    }
+
+    /// A config of `vault = ...` followed by `body` verbatim.
+    fn config_text(&self, body: &str) {
+        let dir = self.path("config/callisto");
+        fs::create_dir_all(&dir).unwrap();
+        let text = format!("vault = {:?}\n{body}", self.vault().display().to_string());
+        fs::write(dir.join("config.toml"), text).unwrap();
+    }
+
+    /// Replaces the export of `repos/<name>` with `lines`.
+    fn export(&self, name: &str, lines: &[String]) {
+        let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
+        let file = self.path("repos").join(name).join(".beads/export.jsonl");
+        fs::write(file, text).unwrap();
+    }
+
+    fn origin(&self, name: &str, url: &str) {
+        fs::write(self.path("repos").join(name).join(".git/origin"), url).unwrap();
+    }
+
+    /// The path of `repos/<name>` as TOML.
+    fn toml_path(&self, name: &str) -> String {
+        format!("{:?}", self.path("repos").join(name).display().to_string())
     }
 
     fn log(&self) -> Vec<Value> {
@@ -583,7 +639,10 @@ fn all_pulls_under_the_lock() {
     drop(held);
     let out: Run = child.wait_with_output().unwrap().into();
     assert_eq!(out.code, Some(0), "{}", out.stderr);
-    assert!(sb.calls("a").unwrap().starts_with("dolt pull"));
+    let calls = sb.calls("a").unwrap();
+    assert!(calls.starts_with("context --json"), "{calls}");
+    let pull = calls.find("dolt pull").expect(&calls);
+    assert!(pull < calls.find("export").expect(&calls), "{calls}");
     assert!(sb.note("Projects/a/first - a-1.md"));
 }
 
@@ -762,4 +821,654 @@ fn help_names_no_default_vault() {
     let out = sb.run(&sb.path("home"), &["--help"]);
     assert_eq!(out.code, Some(0));
     assert!(!out.stdout.contains("~/org"), "{}", out.stdout);
+}
+
+#[test]
+fn all_pulls_and_syncs_a_shared_database_once() {
+    let sb = Sandbox::new();
+    sb.repo("a", "a", &[("a-1", "first")]);
+    sb.repo("b", "b", &[]);
+    sb.share("b", "a");
+    sb.config(&["a", "b"]);
+    let out = sb.run(&sb.path("home"), &["sync", "--all"]);
+    assert_eq!(out.code, Some(0), "{}", out.stderr);
+    assert_eq!(
+        out.stdout,
+        "a: 1 created, 0 updated, 0 removed, 0 unchanged\n"
+    );
+    let a = sb.calls("a").unwrap();
+    assert_eq!(a.matches("dolt pull").count(), 1, "{a}");
+    assert_eq!(a.matches("export").count(), 1, "{a}");
+    let b = sb.calls("b").unwrap_or_default();
+    assert!(!b.contains("dolt pull"), "{b}");
+    assert!(!b.contains("export"), "{b}");
+}
+
+#[test]
+fn unlisted_checkout_syncs_its_group() {
+    let sb = Sandbox::new();
+    sb.repo("a", "a", &[("a-1", "first")]);
+    let c = sb.repo("c", "c", &[]);
+    sb.share("c", "a");
+    sb.config(&["a"]);
+    let out = sb.run(&c, &["sync"]);
+    assert_eq!(out.code, Some(0), "{}", out.stderr);
+    assert!(sb.note("Projects/a/first - a-1.md"));
+    let c_notes: Vec<_> = fs::read_dir(sb.vault().join("Projects/c"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(c_notes, ["c.md"]);
+    assert!(!out.stderr.contains("unchecked"), "{}", out.stderr);
+}
+
+#[test]
+fn hook_in_unlisted_checkout_syncs_its_group() {
+    let sb = Sandbox::new();
+    sb.repo("a", "a", &[("a-1", "first")]);
+    let c = sb.repo("c", "c", &[]);
+    sb.share("c", "a");
+    sb.config(&["a"]);
+    let out = sb.hook(&payload(&c), &[], &[]);
+    assert_quiet_exit(&out);
+    assert!(sb.note("Projects/a/first - a-1.md"));
+    assert!(!sb.note("Projects/c/first - a-1.md"));
+    assert!(sb.log().is_empty(), "{:?}", sb.log());
+}
+
+#[test]
+fn named_repos_in_one_group_sync_once() {
+    let sb = Sandbox::new();
+    sb.repo("a", "a", &[("a-1", "first")]);
+    sb.repo("b", "b", &[]);
+    sb.share("b", "a");
+    sb.config(&["a", "b"]);
+    let out = sb.run(&sb.path("repos"), &["sync", "a", "b"]);
+    assert_eq!(out.code, Some(0), "{}", out.stderr);
+    assert_eq!(
+        out.stdout,
+        "a: 1 created, 0 updated, 0 removed, 0 unchanged\n"
+    );
+    let b = sb.calls("b").unwrap_or_default();
+    assert!(!b.contains("export"), "{b}");
+}
+
+#[test]
+fn unlisted_context_failure_fails_the_target() {
+    let sb = Sandbox::new();
+    sb.repo("a", "a", &[("a-1", "first")]);
+    let c = sb.repo("c", "c", &[("c-1", "third")]);
+    sb.flag("c", "context-fails");
+    sb.config(&["a"]);
+    let out = sb.run(&c, &["sync"]);
+    assert_eq!(out.code, Some(1));
+    let root = c.canonicalize().unwrap().display().to_string();
+    let line = out
+        .stderr
+        .lines()
+        .find(|l| l.starts_with(&format!("callisto: {root}: ")))
+        .expect(&out.stderr);
+    assert!(line.contains("no .beads directory found"), "{line}");
+    let log = sb.log();
+    assert_eq!(log.len(), 1, "{log:?}");
+    assert_eq!(log[0]["stage"], "config");
+    assert!(ends_with(&log[0], "repo", "repos/c"), "{log:?}");
+    assert!(!sb.calls("c").unwrap().contains("export"));
+}
+
+#[test]
+fn broken_unrelated_repo_only_warns() {
+    let sb = Sandbox::new();
+    let a = sb.repo("a", "a", &[("a-1", "first")]);
+    sb.repo("b", "b", &[("b-1", "second")]);
+    sb.flag("b", "context-fails");
+    sb.config(&["a", "b"]);
+    let out = sb.run(&a, &["sync"]);
+    assert_eq!(out.code, Some(0), "{}", out.stderr);
+    assert!(
+        out.stderr.contains("cannot read the prefix of"),
+        "{}",
+        out.stderr
+    );
+    assert!(sb.log().is_empty(), "{:?}", sb.log());
+}
+
+#[test]
+fn all_reports_a_context_failure_once() {
+    let sb = Sandbox::new();
+    sb.repo("a", "a", &[("a-1", "first")]);
+    sb.repo("b", "b", &[("b-1", "second")]);
+    sb.flag("b", "context-fails");
+    sb.config(&["a", "b"]);
+    let out = sb.run(&sb.path("home"), &["sync", "--all"]);
+    assert_eq!(out.code, Some(1));
+    let log = sb.log();
+    assert_eq!(log.len(), 1, "{log:?}");
+    assert_eq!(log[0]["stage"], "config");
+    assert!(ends_with(&log[0], "repo", "repos/b"), "{log:?}");
+    assert!(sb.note("Projects/a/first - a-1.md"));
+}
+
+#[test]
+fn hook_calls_context_once_per_repo() {
+    let sb = Sandbox::new();
+    let repo = sb.repo("a", "a", &[("a-1", "first")]);
+    sb.config(&["a"]);
+    let out = sb.hook(&payload(&repo), &[], &[]);
+    assert_quiet_exit(&out);
+    let calls = sb.calls("a").unwrap();
+    assert_eq!(calls.matches("context").count(), 1, "{calls}");
+}
+
+#[test]
+fn all_failed_pull_in_shared_group_logs_once() {
+    let sb = Sandbox::new();
+    sb.repo("a", "a", &[("a-1", "first")]);
+    sb.repo("b", "b", &[]);
+    sb.share("b", "a");
+    sb.flag("a", "pull-fails");
+    sb.config(&["a", "b"]);
+    let out = sb.run(&sb.path("home"), &["sync", "--all"]);
+    assert_eq!(out.code, Some(1));
+    let log = sb.log();
+    assert_eq!(log.len(), 1, "{log:?}");
+    assert_eq!(log[0]["stage"], "pull");
+    assert!(ends_with(&log[0], "repo", "repos/a"), "{log:?}");
+}
+
+#[test]
+fn all_pulls_a_group_through_its_first_resolved_member() {
+    let sb = Sandbox::new();
+    sb.repo("a", "a", &[("a-1", "first")]);
+    sb.repo("b", "b", &[]);
+    sb.share("b", "a");
+    sb.config(&["a/missing", "b"]);
+    let out = sb.run(&sb.path("home"), &["sync", "--all"]);
+    assert_eq!(out.code, Some(1));
+    assert!(out.stderr.contains("no such directory"), "{}", out.stderr);
+    assert_eq!(
+        out.stdout,
+        "b: 1 created, 0 updated, 0 removed, 0 unchanged\n"
+    );
+    let a = sb.calls("a").unwrap_or_default();
+    assert!(!a.contains("dolt pull"), "{a}");
+    let b = sb.calls("b").unwrap();
+    assert_eq!(b.matches("dolt pull").count(), 1, "{b}");
+    assert!(sb.note("Projects/b/first - a-1.md"));
+}
+
+#[test]
+fn all_syncs_a_repo_reached_only_through_a_symlink() {
+    let sb = Sandbox::new();
+    sb.repo("a", "a", &[("a-1", "first")]);
+    sb.repo("b", "b", &[("b-1", "second")]);
+    let link = sb.path("home/x");
+    std::os::unix::fs::symlink(sb.path("repos/b/sub"), &link).unwrap();
+    sb.config(&["a"]);
+    let file = sb.path("config/callisto/config.toml");
+    let text = fs::read_to_string(&file)
+        .unwrap()
+        .replace("]\n", &format!(", {:?}]\n", link.display().to_string()));
+    fs::write(&file, text).unwrap();
+    let out = sb.run(&sb.path("home"), &["sync", "--all"]);
+    assert_eq!(out.code, Some(0), "{}", out.stderr);
+    let b = sb.calls("b").unwrap();
+    assert_eq!(b.matches("dolt pull").count(), 1, "{b}");
+    assert!(sb.note("Projects/b/second - b-1.md"));
+    assert!(out.stdout.contains("b: 1 created"), "{}", out.stdout);
+}
+
+fn assert_no_standing_state(sb: &Sandbox) {
+    assert!(
+        !sb.path("state/callisto/conditions.json").exists(),
+        "conditions.json written"
+    );
+    assert!(sb.log().is_empty(), "{:?}", sb.log());
+}
+
+#[test]
+fn home_sync_writes_no_condition_state() {
+    let sb = Sandbox::new();
+    let repo = sb.repo("a", "a", &[("a-1", "first")]);
+    sb.config(&["a"]);
+    let all = sb.sync(sb.tmp.path(), &["--all"]);
+    assert_eq!(all.code, Some(0), "{}", all.stderr);
+    assert_eq!(
+        all.stdout,
+        "a: 1 created, 0 updated, 0 removed, 0 unchanged\n"
+    );
+    assert_eq!(all.stderr, "");
+    assert_no_standing_state(&sb);
+    let one = sb.sync(&repo, &[]);
+    assert_eq!(one.code, Some(0), "{}", one.stderr);
+    assert_eq!(
+        one.stdout,
+        "a: 0 created, 0 updated, 0 removed, 1 unchanged\n"
+    );
+    assert_eq!(one.stderr, "");
+    assert_no_standing_state(&sb);
+    let hook = sb.hook(&payload(&repo), &[], &[]);
+    assert_quiet_exit(&hook);
+    assert_no_standing_state(&sb);
+}
+
+#[test]
+fn unlisted_checkout_writes_no_state() {
+    let sb = Sandbox::new();
+    sb.repo("a", "a", &[("a-1", "first")]);
+    let c = sb.repo("c", "c", &[("c-1", "third")]);
+    sb.config(&["a"]);
+    let one = sb.sync(&c, &[]);
+    assert_eq!(one.code, Some(0), "{}", one.stderr);
+    assert_eq!(
+        one.stdout,
+        "c: 1 created, 0 updated, 0 removed, 0 unchanged\n"
+    );
+    assert_eq!(
+        one.stderr,
+        format!(
+            "callisto: {}: warning: prefix \"c\" is not in the configured repo list, so it is unchecked\n",
+            c.canonicalize().unwrap().display()
+        )
+    );
+    assert_no_standing_state(&sb);
+    let hook = sb.hook(&payload(&c), &[], &[]);
+    assert_quiet_exit(&hook);
+    assert_no_standing_state(&sb);
+}
+
+#[test]
+fn hook_context_failure_still_records_config() {
+    let sb = Sandbox::new();
+    sb.repo("a", "a", &[("a-1", "first")]);
+    let c = sb.repo("c", "c", &[("c-1", "third")]);
+    sb.flag("c", "context-fails");
+    sb.config(&["a"]);
+    fs::create_dir_all(sb.path("state/callisto")).unwrap();
+    fs::write(
+        sb.path("state/callisto/conditions.json"),
+        r#"{"config":"old"}"#,
+    )
+    .unwrap();
+    let out = sb.hook(&payload(&c), &[], &[]);
+    assert_quiet_exit(&out);
+    let stages: Vec<_> = sb.log().iter().map(|e| e["stage"].clone()).collect();
+    assert_eq!(stages, ["config", "conditions"], "{stages:?}");
+}
+
+/// Every file under `dir`, recursively.
+fn files(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for entry in fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            out.extend(files(&path));
+        } else {
+            out.push(path);
+        }
+    }
+    out
+}
+
+fn conditions(sb: &Sandbox) -> Vec<Value> {
+    sb.log()
+        .into_iter()
+        .filter(|e| e["stage"] == "conditions")
+        .collect()
+}
+
+/// Checkouts `a` (prefix `w`) and `b`, sharing `a`'s database, whose
+/// export holds `w-1` for `o/a`, `w-2` for `o/b` and `w-3` for neither.
+/// The vault has the default unfiled folder.
+fn rollout(sb: &Sandbox, a: &str, b: &str) {
+    sb.repo("a", "w", &[]);
+    sb.repo("b", "w", &[]);
+    sb.share("b", "a");
+    sb.export(
+        "a",
+        &[
+            meta_line("w-1", "first", Some(a)),
+            meta_line("w-2", "second", Some(b)),
+            meta_line("w-3", "third", None),
+        ],
+    );
+    fs::create_dir_all(sb.vault().join("Inbox")).unwrap();
+}
+
+#[test]
+fn all_syncs_a_table_entry_reached_through_a_symlink() {
+    let sb = Sandbox::new();
+    rollout(&sb, "o/a", "o/b");
+    let link = sb.path("home/x");
+    std::os::unix::fs::symlink(sb.path("repos/b/sub"), &link).unwrap();
+    sb.config_text(&format!(
+        "field = \"metadata.repo\"\nrepos = [{{ path = {}, value = \"o/a\" }}, {{ path = {:?}, value = \"o/b\", project = \"b\" }}]\n",
+        sb.toml_path("a"),
+        link.display().to_string()
+    ));
+    let out = sb.run(&sb.path("home"), &["sync", "--all"]);
+    assert_rollout_filed(&sb, &out);
+    assert!(!out.stderr.contains("unresolvable"), "{}", out.stderr);
+}
+
+fn assert_rollout_filed(sb: &Sandbox, out: &Run) {
+    assert_eq!(out.code, Some(0), "{}", out.stderr);
+    assert!(sb.note("Projects/a/first - w-1.md"), "{}", out.stderr);
+    assert!(sb.note("Projects/b/second - w-2.md"), "{}", out.stderr);
+    let named: Vec<_> = files(&sb.vault())
+        .into_iter()
+        .filter(|f| f.to_string_lossy().contains("w-3"))
+        .collect();
+    assert!(named.is_empty(), "{named:?}");
+}
+
+#[test]
+fn rollout_shared_database_two_repos_one_unclaimed() {
+    let sb = Sandbox::new();
+    rollout(&sb, "o/a", "o/b");
+    sb.config_text(&format!(
+        "field = \"metadata.repo\"\nrepos = [{{ path = {}, value = \"o/a\" }}, {{ path = {}, value = \"o/b\" }}]\n",
+        sb.toml_path("a"),
+        sb.toml_path("b")
+    ));
+    let out = sb.run(&sb.path("home"), &["sync", "--all"]);
+    assert_rollout_filed(&sb, &out);
+    assert!(
+        out.stderr.contains("1 unclaimed bead (w-3)"),
+        "{}",
+        out.stderr
+    );
+    let a = sb.calls("a").unwrap();
+    assert_eq!(a.matches("export").count(), 1, "{a}");
+    let b = sb.calls("b").unwrap_or_default();
+    assert!(!b.contains("export"), "{b}");
+    let index = fs::read_to_string(sb.vault().join("Inbox/Unfiled beads - w.md")).unwrap();
+    assert!(index.contains("| w-3 | third |"), "{index}");
+    for id in ["w-1", "w-2"] {
+        assert!(!index.contains(&format!("| {id} |")), "{index}");
+    }
+    let before = conditions(&sb).len();
+    let again = sb.run(&sb.path("home"), &["sync", "--all"]);
+    assert_eq!(again.code, Some(0), "{}", again.stderr);
+    assert_eq!(conditions(&sb).len(), before, "{:?}", sb.log());
+}
+
+#[test]
+fn defaulted_value_from_origin() {
+    let sb = Sandbox::new();
+    rollout(&sb, "github.com/o/a", "github.com/o/b");
+    sb.origin("a", "git@github.com:o/a.git");
+    sb.origin("b", "https://github.com/o/b");
+    sb.config_text(&format!(
+        "field = \"metadata.repo\"\nrepos = [{{ path = {} }}, {{ path = {} }}]\n",
+        sb.toml_path("a"),
+        sb.toml_path("b")
+    ));
+    let out = sb.run(&sb.path("home"), &["sync", "--all"]);
+    assert_rollout_filed(&sb, &out);
+}
+
+#[test]
+fn absent_table_entry_leaves_home_repo_whole() {
+    let sb = Sandbox::new();
+    sb.repo("home", "h", &[("h-1", "first"), ("h-2", "second")]);
+    sb.config_text(&format!(
+        "field = \"metadata.repo\"\nrepos = [{}, {{ path = {}, value = \"o/x\" }}]\n",
+        sb.toml_path("home"),
+        sb.toml_path("gone")
+    ));
+    let first = sb.run(&sb.path("home"), &["sync", "--all"]);
+    assert_eq!(first.code, Some(1), "{}", first.stderr);
+    let note = sb.vault().join("Projects/home/second - h-2.md");
+    assert!(note.is_file(), "{}", first.stderr);
+    sb.export("home", &[line("h-1", "first")]);
+    let out = sb.run(&sb.path("home"), &["sync", "--all"]);
+    assert_eq!(out.code, Some(1), "{}", out.stderr);
+    let text = fs::read_to_string(&note).unwrap();
+    assert!(text.contains("beadRemoved: true"), "{text}");
+    assert!(
+        !out.stderr.contains("removed beads were not marked"),
+        "{}",
+        out.stderr
+    );
+    assert!(out.stderr.contains("table entry"), "{}", out.stderr);
+    assert!(out.stderr.contains("is unresolvable"), "{}", out.stderr);
+    assert!(!out.stderr.contains("no such directory"), "{}", out.stderr);
+    let failures: Vec<_> = sb
+        .log()
+        .into_iter()
+        .filter(|e| e["error"].as_str().unwrap().contains("no such directory"))
+        .collect();
+    assert!(failures.is_empty(), "{failures:?}");
+}
+
+/// `a` (a path entry) and `b` (a table entry) share `a`'s database;
+/// `home` is a path repo of its own.
+fn broken_group(sb: &Sandbox) {
+    sb.repo("a", "w", &[("w-1", "first")]);
+    sb.repo("b", "w", &[]);
+    sb.share("b", "a");
+    sb.repo("home", "h", &[("h-1", "home first")]);
+    sb.config_text(&format!(
+        "field = \"metadata.repo\"\nrepos = [{}, {{ path = {}, value = \"o/b\" }}, {}]\n",
+        sb.toml_path("a"),
+        sb.toml_path("b"),
+        sb.toml_path("home")
+    ));
+}
+
+#[test]
+fn broken_group_fails_alone() {
+    let sb = Sandbox::new();
+    broken_group(&sb);
+    let out = sb.run(&sb.path("home"), &["sync", "--all"]);
+    assert_eq!(out.code, Some(1), "{}", out.stderr);
+    assert!(sb.note("Projects/home/home first - h-1.md"));
+    assert!(
+        out.stderr
+            .contains("group not synced: path and table entries share one database"),
+        "{}",
+        out.stderr
+    );
+    for name in ["a", "b"] {
+        let calls = sb.calls(name).unwrap_or_default();
+        assert!(!calls.contains("dolt pull"), "{calls}");
+        assert!(!calls.contains("export"), "{calls}");
+    }
+}
+
+#[test]
+fn hook_in_broken_group_logs_once() {
+    let sb = Sandbox::new();
+    broken_group(&sb);
+    for _ in 0..2 {
+        let out = sb.hook(&payload(&sb.path("repos/b")), &[], &[]);
+        assert_quiet_exit(&out);
+    }
+    let logged = conditions(&sb);
+    assert_eq!(logged.len(), 1, "{:?}", sb.log());
+    let error = logged[0]["error"].as_str().unwrap();
+    assert!(error.contains("group not synced"), "{error}");
+    let calls = sb.calls("a").unwrap_or_default();
+    assert!(!calls.contains("export"), "{calls}");
+}
+
+#[test]
+fn hook_in_table_group_files_claims() {
+    let sb = Sandbox::new();
+    rollout(&sb, "o/a", "o/b");
+    sb.config_text(&format!(
+        "field = \"metadata.repo\"\nrepos = [{{ path = {}, value = \"o/a\" }}, {{ path = {}, value = \"o/b\" }}]\n",
+        sb.toml_path("a"),
+        sb.toml_path("b")
+    ));
+    for _ in 0..2 {
+        let out = sb.hook(&payload(&sb.path("repos/b")), &[], &[]);
+        assert_quiet_exit(&out);
+    }
+    assert!(sb.note("Projects/a/first - w-1.md"), "{:?}", sb.log());
+    assert!(sb.note("Projects/b/second - w-2.md"), "{:?}", sb.log());
+    let named: Vec<_> = files(&sb.vault())
+        .into_iter()
+        .filter(|f| f.to_string_lossy().contains("w-3"))
+        .collect();
+    assert!(named.is_empty(), "{named:?}");
+    let logged = conditions(&sb);
+    assert_eq!(logged.len(), 1, "{:?}", sb.log());
+    let error = logged[0]["error"].as_str().unwrap();
+    assert!(error.contains("1 unclaimed bead (w-3)"), "{error}");
+}
+
+#[test]
+fn hook_in_unlisted_checkout_skipped_while_degraded() {
+    let sb = Sandbox::new();
+    sb.repo("a", "a", &[("a-1", "first")]);
+    let c = sb.repo("c", "c", &[("c-1", "third")]);
+    sb.config_text(&format!(
+        "field = \"metadata.repo\"\nrepos = [{{ path = {} }}]\n",
+        sb.toml_path("a")
+    ));
+    for _ in 0..2 {
+        let out = sb.hook(&payload(&c), &[], &[]);
+        assert_quiet_exit(&out);
+    }
+    assert!(!sb.note("Projects/c/third - c-1.md"));
+    let skipped: Vec<_> = conditions(&sb)
+        .into_iter()
+        .filter(|e| {
+            e["error"]
+                .as_str()
+                .unwrap()
+                .contains("not in repos and a table entry is unresolvable; nothing synced")
+        })
+        .collect();
+    assert_eq!(skipped.len(), 1, "{:?}", sb.log());
+}
+
+#[test]
+fn unlisted_checkout_skipped_while_degraded() {
+    let sb = Sandbox::new();
+    sb.repo("a", "a", &[("a-1", "first")]);
+    let c = sb.repo("c", "c", &[("c-1", "third")]);
+    let table = |value: &str| {
+        format!(
+            "field = \"metadata.repo\"\nrepos = [{{ path = {}{value} }}]\n",
+            sb.toml_path("a")
+        )
+    };
+    sb.config_text(&table(""));
+    let out = sb.run(&c, &["sync"]);
+    assert_eq!(out.code, Some(1), "{}", out.stderr);
+    assert!(
+        out.stderr
+            .contains("not in repos and a table entry is unresolvable; nothing synced"),
+        "{}",
+        out.stderr
+    );
+    assert!(!sb.note("Projects/c/third - c-1.md"));
+    sb.config_text(&table(", value = \"o/a\""));
+    let out = sb.run(&c, &["sync"]);
+    assert_eq!(out.code, Some(0), "{}", out.stderr);
+    assert!(sb.note("Projects/c/third - c-1.md"));
+}
+
+#[test]
+fn degraded_table_group_skips_removal() {
+    let sb = Sandbox::new();
+    sb.repo("a", "w", &[]);
+    sb.repo("b", "w", &[]);
+    sb.share("b", "a");
+    sb.config_text(&format!(
+        "field = \"metadata.repo\"\nrepos = [{{ path = {}, value = \"o/a\" }}, {{ path = {} }}]\n",
+        sb.toml_path("a"),
+        sb.toml_path("b")
+    ));
+    sb.export("a", &[meta_line("w-9", "old", Some("o/a"))]);
+    fs::create_dir_all(sb.vault().join("Inbox")).unwrap();
+    let repos = sb.path("repos");
+    sb.run(&repos, &["sync", "a"]);
+    let old = sb.vault().join("Projects/a/old - w-9.md");
+    assert!(old.is_file());
+    sb.export("a", &[meta_line("w-1", "first", Some("o/a"))]);
+    let out = sb.run(&repos, &["sync", "a"]);
+    assert_eq!(out.code, Some(1), "{}", out.stderr);
+    assert!(sb.note("Projects/a/first - w-1.md"), "{}", out.stderr);
+    let text = fs::read_to_string(&old).unwrap();
+    assert!(!text.contains("beadRemoved: true"), "{text}");
+    assert!(
+        out.stderr.contains("removed beads were not marked"),
+        "{}",
+        out.stderr
+    );
+    sb.origin("b", "https://github.com/o/b");
+    let out = sb.run(&repos, &["sync", "a"]);
+    assert_eq!(out.code, Some(0), "{}", out.stderr);
+    let text = fs::read_to_string(&old).unwrap();
+    assert!(text.contains("beadRemoved: true"), "{text}");
+}
+
+fn two_entry_config(sb: &Sandbox, extra: &str) {
+    sb.config_text(&format!(
+        "{extra}field = \"metadata.repo\"\nrepos = [{{ path = {}, value = \"o/a\" }}, {{ path = {}, value = \"o/b\" }}]\n",
+        sb.toml_path("a"),
+        sb.toml_path("b")
+    ));
+}
+
+#[test]
+fn missing_unfiled_folder_fails_sync() {
+    let sb = Sandbox::new();
+    rollout(&sb, "o/a", "o/b");
+    fs::remove_dir(sb.vault().join("Inbox")).unwrap();
+    two_entry_config(&sb, "");
+    let out = sb.run(&sb.path("home"), &["sync", "--all"]);
+    assert_eq!(out.code, Some(1), "{}", out.stderr);
+    assert!(
+        out.stderr
+            .contains("unfiled folder \"Inbox\" is missing; index not written"),
+        "{}",
+        out.stderr
+    );
+    assert!(!sb.vault().join("Inbox").exists());
+    assert!(sb.note("Projects/a/first - w-1.md"));
+    assert!(sb.note("Projects/b/second - w-2.md"));
+    let before = conditions(&sb).len();
+    sb.run(&sb.path("home"), &["sync", "--all"]);
+    assert_eq!(conditions(&sb).len(), before, "{:?}", sb.log());
+}
+
+#[test]
+fn custom_unfiled_folder() {
+    let sb = Sandbox::new();
+    rollout(&sb, "o/a", "o/b");
+    fs::create_dir_all(sb.vault().join("Beads/Unfiled")).unwrap();
+    two_entry_config(&sb, "unfiled = \"Beads/Unfiled\"\n");
+    let out = sb.run(&sb.path("home"), &["sync", "--all"]);
+    assert_eq!(out.code, Some(0), "{}", out.stderr);
+    assert!(
+        sb.note("Beads/Unfiled/Unfiled beads - w.md"),
+        "{}",
+        out.stderr
+    );
+}
+
+#[test]
+fn hook_writes_index() {
+    let sb = Sandbox::new();
+    rollout(&sb, "o/a", "o/b");
+    two_entry_config(&sb, "");
+    let out = sb.hook(&payload(&sb.path("repos/a")), &[], &[]);
+    assert_quiet_exit(&out);
+    assert!(sb.note("Inbox/Unfiled beads - w.md"), "{:?}", sb.log());
+}
+
+#[test]
+fn path_only_config_writes_no_index() {
+    let sb = Sandbox::new();
+    sb.repo("a", "a", &[("a-1", "first")]);
+    sb.config(&["a"]);
+    fs::create_dir(sb.vault().join("Inbox")).unwrap();
+    let out = sb.run(&sb.path("home"), &["sync", "--all"]);
+    assert_eq!(out.code, Some(0), "{}", out.stderr);
+    assert_eq!(fs::read_dir(sb.vault().join("Inbox")).unwrap().count(), 0);
 }
