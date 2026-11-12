@@ -220,6 +220,7 @@ impl Groups {
     pub fn resolve(&mut self, git: &Git) {
         let mut unresolvable = Vec::new();
         let mut claims = vec![Vec::new(); self.groups.len()];
+        let mut values = vec![Vec::new(); self.groups.len()];
         for (entry, placed) in &self.configured {
             let RepoEntry::Table(table) = entry else {
                 continue;
@@ -228,7 +229,18 @@ impl Groups {
                 None => Err(self.unplaced_reason(&lookup_path(entry))),
                 Some((g, e)) => {
                     let group = &self.groups[g];
-                    claim(group, &group.entries[e].repo, table, git).map(|c| claims[g].push(c))
+                    let claim = claim(&group.entries[e].repo, table, git);
+                    // Kept apart from claims so that a run with no prefix
+                    // read yet, as before `sync --all` pulls, still sees
+                    // two entries sharing a value.
+                    if let Ok(c) = &claim {
+                        values[g].push(c.values.clone());
+                    }
+                    if group.prefix.is_none() {
+                        Err("cannot read the issue prefix".to_string())
+                    } else {
+                        claim.map(|c| claims[g].push(c))
+                    }
                 }
             };
             if let Err(reason) = result {
@@ -238,8 +250,8 @@ impl Groups {
                 });
             }
         }
-        for (group, claims) in self.groups.iter_mut().zip(claims) {
-            group.ownership = ownership(&group.entries, claims);
+        for ((group, claims), values) in self.groups.iter_mut().zip(claims).zip(values) {
+            group.ownership = ownership(&group.entries, claims, &values);
         }
         self.unresolvable = unresolvable;
     }
@@ -305,10 +317,7 @@ impl Groups {
     }
 }
 
-fn claim(group: &Group, repo: &Repo, table: &TableEntry, git: &Git) -> Result<Claim, String> {
-    if group.prefix.is_none() {
-        return Err("cannot read the issue prefix".to_string());
-    }
+fn claim(repo: &Repo, table: &TableEntry, git: &Git) -> Result<Claim, String> {
     let values = match &table.value {
         Some(values) => values.clone(),
         None => vec![git.origin(&repo.root).map_err(|e| e.to_string())?],
@@ -317,7 +326,7 @@ fn claim(group: &Group, repo: &Repo, table: &TableEntry, git: &Git) -> Result<Cl
     Ok(Claim { values, project })
 }
 
-fn ownership(entries: &[Placed], claims: Vec<Claim>) -> Ownership {
+fn ownership(entries: &[Placed], claims: Vec<Claim>, values: &[Vec<String>]) -> Ownership {
     let tables: Vec<(&Repo, &TableEntry)> = entries
         .iter()
         .filter_map(|p| match &p.entry {
@@ -343,11 +352,11 @@ fn ownership(entries: &[Placed], claims: Vec<Claim>) -> Ownership {
         }
     }
     let mut seen: Vec<&str> = Vec::new();
-    for claim in &claims {
-        if let Some(v) = claim.values.iter().find(|v| seen.contains(&v.as_str())) {
+    for entry in values {
+        if let Some(v) = entry.iter().find(|v| seen.contains(&v.as_str())) {
             return Ownership::Broken(format!("value \"{v}\" is claimed by more than one entry"));
         }
-        seen.extend(claim.values.iter().map(String::as_str));
+        seen.extend(entry.iter().map(String::as_str));
     }
     match first.field.parse() {
         Ok(field) => Ownership::Field(FieldClaims { field, claims }),

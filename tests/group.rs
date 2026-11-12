@@ -507,6 +507,27 @@ fn shared_value_is_broken() {
 }
 
 #[test]
+fn shared_value_is_broken_before_prefixes_are_read() {
+    let f = fixture();
+    let db = f.shared(Some("w"));
+    let a = f.redirected("a", &db);
+    let b = f.redirected("b", &db);
+    let mut g = Groups::derive(
+        &f.bd,
+        &[
+            table(&a, Some(&["o/x"]), None),
+            table(&b, Some(&["o/x"]), None),
+        ],
+    );
+    g.resolve(&f.git);
+    let reason = broken(&g.groups[0].ownership);
+    assert!(
+        reason.contains(r#"value "o/x" is claimed by more than one entry"#),
+        "{reason}"
+    );
+}
+
+#[test]
 fn path_only_config_is_unchanged() {
     let f = fixture();
     let a = f.repo("a", "a");
