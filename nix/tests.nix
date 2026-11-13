@@ -458,7 +458,14 @@ let
           cfg = hmConfig {
             inherit system;
             pkgs = nixpkgs.legacyPackages.${system}.extend (
-              _: _: { inherit (hostPkgs) runCommand writeText writeTextFile; }
+              _: _: {
+                inherit (hostPkgs)
+                  linkFarm
+                  runCommand
+                  writeText
+                  writeTextFile
+                  ;
+              }
             );
             settings = {
               enable = true;
