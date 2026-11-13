@@ -1047,6 +1047,27 @@ fn dot_prefixed_split_project_is_unfiled() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn symlinked_split_project_is_unfiled() {
+    let f = split();
+    fs::create_dir_all(f.vault.join("Elsewhere/x")).unwrap();
+    fs::create_dir_all(f.vault.join("Projects")).unwrap();
+    std::os::unix::fs::symlink(f.vault.join("Elsewhere/x"), f.vault.join("Projects/x")).unwrap();
+    f.set_export(&[field_line("zz-1", "one", "open", Some(r#"{"repo":"o/x"}"#))]);
+    let report = f.run_split(&[]).unwrap();
+    assert!(!f.vault.join("Elsewhere/x/one - zz-1.md").exists());
+    assert_eq!(report.created, paths(&[INDEX]));
+    assert_eq!(report.unfiled[0].reason, Reason::MissingProject("x".into()));
+    assert_eq!(
+        report.conditions,
+        [Condition::MissingProject {
+            project: "x".into(),
+            ids: vec!["zz-1".into()]
+        }]
+    );
+}
+
 #[test]
 fn unfiled_existing_note_is_left_alone() {
     let f = split();
