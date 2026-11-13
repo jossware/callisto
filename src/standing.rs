@@ -383,10 +383,7 @@ mod tests {
             project: "Foo".into(),
             ids: ids(&["w-4", "w-3"]),
         };
-        assert_eq!(
-            text(c),
-            "2 beads for missing project \"Foo\" (w-3, w-4)"
-        );
+        assert_eq!(text(c), "2 beads for missing project \"Foo\" (w-3, w-4)");
     }
 
     #[test]

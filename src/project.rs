@@ -28,15 +28,26 @@ impl Project {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Unmapped {
     pub name: String,
-    pub overridden: bool,
+    pub source: Source,
+}
+
+/// Where a project name came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Source {
+    /// The name of the directory that holds the database.
+    Default,
+    /// The database's bd setting.
+    Setting,
+    /// The database's `project` in the config file.
+    Config,
 }
 
 impl fmt::Display for Unmapped {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let source = if self.overridden {
-            format!(" (set by {PROJECT_KEY})")
-        } else {
-            String::new()
+        let source = match self.source {
+            Source::Default => String::new(),
+            Source::Setting => format!(" (set by {PROJECT_KEY})"),
+            Source::Config => " (set by project in config)".to_string(),
         };
         write!(
             f,
@@ -49,13 +60,13 @@ impl fmt::Display for Unmapped {
 /// Files under `name` unless `settings` overrides it. A set override is
 /// final: falling back to `name` would hide a typo in it.
 pub fn map(vault: &Path, name: &str, settings: &Settings) -> Result<Project, Unmapped> {
-    let (name, overridden) = match &settings.project {
-        Some(project) => (project.as_str(), true),
-        None => (name, false),
+    let (name, source) = match &settings.project {
+        Some(project) => (project.as_str(), Source::Setting),
+        None => (name, Source::Default),
     };
     find(vault, name).ok_or_else(|| Unmapped {
         name: name.to_string(),
-        overridden,
+        source,
     })
 }
 
@@ -250,7 +261,7 @@ mod tests {
             err,
             Unmapped {
                 name: "stctl".into(),
-                overridden: false,
+                source: Source::Default,
             }
         );
         let text = err.to_string();
@@ -268,7 +279,7 @@ mod tests {
         home(vault.path(), "Projects", "infra");
         let err = map(vault.path(), "infra", &settings(Some("Gone"))).unwrap_err();
         assert_eq!(err.name, "Gone");
-        assert!(err.overridden);
+        assert_eq!(err.source, Source::Setting);
         assert!(err.to_string().contains("custom.obsidian.project"), "{err}");
     }
 

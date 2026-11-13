@@ -15,6 +15,7 @@ use callisto::config::{Filing, Split};
 use callisto::database::Database;
 use callisto::errlog::Stage;
 use callisto::lock;
+use callisto::project::Source;
 use callisto::standing::Condition;
 use callisto::sync::{self, Report, Request, Scope, Warning};
 use callisto::vault::Index;
@@ -855,6 +856,9 @@ fn missing_config_project_does_not_fall_back() {
         panic!("{:?}", report.warnings);
     };
     assert_eq!(unmapped.name, "Gone");
+    assert_eq!(unmapped.source, Source::Config);
+    let text = unmapped.to_string();
+    assert!(text.contains("(set by project in config)"), "{text}");
 }
 
 #[test]
@@ -868,7 +872,7 @@ fn bd_project_setting_is_an_override() {
         panic!("{:?}", report.warnings);
     };
     assert_eq!(unmapped.name, "Gone");
-    assert!(unmapped.overridden);
+    assert_eq!(unmapped.source, Source::Setting);
 }
 
 /// `line`, carrying `metadata` when given.

@@ -18,7 +18,7 @@ use crate::field_path::{FieldPath, FieldValue};
 use crate::filename;
 use crate::graph::Graph;
 use crate::lock::Lock;
-use crate::project::{self, Project, Unmapped};
+use crate::project::{self, Project, Source, Unmapped};
 use crate::removed;
 use crate::render::{self, frontmatter::Context, link::Links, unfiled};
 use crate::repo::{self, SettingsError};
@@ -232,7 +232,7 @@ pub fn sync_database(_lock: &Lock, req: &Request) -> Result<Report, Error> {
             let mapped = match project {
                 Some(name) => project::find(req.vault, name).ok_or_else(|| Unmapped {
                     name: name.clone(),
-                    overridden: false,
+                    source: Source::Config,
                 }),
                 None => project::map(req.vault, &database.name, &settings),
             };
