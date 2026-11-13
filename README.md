@@ -129,7 +129,8 @@ Each `[[databases]]` entry:
 - Each `locations` entry follows the same rule as `unfiled`. A
   segment MUST NOT start with `.`: the vault scan skips such folders,
   so notes filed there would be lost. The list MUST NOT be empty and
-  MUST NOT repeat an entry.
+  MUST NOT repeat an entry. A location reached through a symlink is
+  skipped at lookup, because the vault scan does not follow symlinks.
 - Unknown keys are an error, inside an entry and inside `split` too,
   so a typo cannot empty the list.
 - A `beads_dir` that does not exist does not fail loading. It fails
@@ -158,6 +159,8 @@ A database with no `split` files every bead under one project:
    A name starting with `.` never matches a folder, because the vault scan
    skips dot-prefixed folders. For such a database, set `project` or
    `custom.obsidian.project`.
+   A project folder that is a symlink never matches either, because the
+   vault scan does not follow symlinks.
 
 A split database files each bead by the value at `split.by`:
 
