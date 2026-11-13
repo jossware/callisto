@@ -19,8 +19,10 @@ const BIN: &str = env!("CARGO_BIN_EXE_callisto");
 // Linux Nix build sandbox. Like bd, `context` prefers BEADS_DIR to a
 // checkout's own `.beads`.
 const FAKE_BD: &str = r#"#!/bin/sh
+[ -n "$HOME" ] && echo "$*" >> "$HOME/bd.log" 2>/dev/null
 d="${BEADS_DIR:-$PWD/.beads}"
-[ -z "$BEADS_DIR" ] && [ -f .beads/redirect ] && read -r d < .beads/redirect
+[ -n "$BEADS_DB" ] && d="$BEADS_DB"
+[ -z "$BEADS_DIR" ] && [ -z "$BEADS_DB" ] && [ -f .beads/redirect ] && read -r d < .beads/redirect
 [ -d "$d" ] && echo "$*" >> "$d/calls"
 case "$1" in
 context)
@@ -1229,7 +1231,10 @@ fn stray_beads_env_does_not_change_a_configured_sync() {
     let other = sb.repo("other", "o", &[("o-1", "stray")]);
     sb.config(&["a"]);
     let other_db = env_dir(&other.join(".beads"));
-    let envs = [("BEADS_DIR", other_db.as_str()), ("BEADS_DB", "/nowhere")];
+    let envs = [
+        ("BEADS_DIR", other_db.as_str()),
+        ("BEADS_DB", other_db.as_str()),
+    ];
     let first = sb.run_env(&sb.path("home"), &["sync", "--all"], &envs);
     assert_eq!(first.code, Some(0), "{}", first.stderr);
     assert!(sb.note("Projects/a/first - a-1.md"));
@@ -1305,10 +1310,10 @@ fn hook_without_beads_or_beads_dir_runs_no_bd() {
     let sb = Sandbox::new();
     sb.repo("a", "a", &[("a-1", "first")]);
     let bare = sb.bare("bare");
-    sb.config(&["a"]);
+    sb.config_text("this is [not toml\n");
     let out = sb.hook(&payload(&bare), &[], &[]);
     assert_quiet_exit(&out);
-    assert!(sb.calls("a").is_none());
+    assert!(!sb.path("home/bd.log").exists(), "bd ran");
     assert!(sb.log().is_empty(), "{:?}", sb.log());
     assert!(!sb.note("Projects/a/first - a-1.md"));
 }
