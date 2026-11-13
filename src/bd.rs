@@ -86,21 +86,10 @@ impl Bd {
             .current_dir(dir)
             .env_remove("BEADS_DB")
             .stdin(Stdio::null());
-        match target {
-            Target::Discover => {
-                command.env_remove("BEADS_DIR");
-            }
-            Target::Inherit => {}
-            Target::Database(database) => {
-                command.env("BEADS_DIR", database);
-            }
+        if let Target::Database(database) = target {
+            command.env("BEADS_DIR", database);
         }
         command
-    }
-
-    /// Runs bd in `checkout` and returns its stdout.
-    pub fn run(&self, checkout: &Path, args: &[&str]) -> Result<String, BdError> {
-        self.exec(checkout, args, Target::Discover)
     }
 
     /// Runs bd against the beads database at `database`.
@@ -127,17 +116,11 @@ impl Bd {
         String::from_utf8(output.stdout).map_err(|_| BdError::NotUtf8 { args })
     }
 
-    /// Reads one `bd config` key in `checkout`. A blank, null or absent
-    /// value counts as unset.
-    pub fn config_get(&self, checkout: &Path, key: &str) -> Result<Option<String>, BdError> {
+    /// Reads one `bd config` key of the database at `database`. A blank,
+    /// null or absent value counts as unset.
+    pub fn config_get_on(&self, database: &Path, key: &str) -> Result<Option<String>, BdError> {
         // The text form prints `<key> (not set)` for an unset key, which a
         // value could also read as.
-        let args = ["config", "get", "--json", key];
-        parse_config(&args, &self.run(checkout, &args)?)
-    }
-
-    /// Reads one `bd config` key of the database at `database`.
-    pub fn config_get_on(&self, database: &Path, key: &str) -> Result<Option<String>, BdError> {
         let args = ["config", "get", "--json", key];
         parse_config(&args, &self.run_on(database, &args)?)
     }
@@ -149,19 +132,11 @@ impl Bd {
         let out = self.exec(dir, &args, Target::Inherit)?;
         parse_context(&args, &out)
     }
-
-    /// Reads where bd keeps the database for `checkout`, following any
-    /// redirect.
-    pub fn context(&self, checkout: &Path) -> Result<Context, BdError> {
-        let args = ["context", "--json"];
-        parse_context(&args, &self.run(checkout, &args)?)
-    }
 }
 
 /// Which beads database a bd call reaches.
 #[derive(Clone, Copy)]
 enum Target<'a> {
-    Discover,
     Inherit,
     Database(&'a Path),
 }
@@ -230,10 +205,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn returns_stdout_and_runs_in_the_checkout() {
+    fn returns_stdout() {
         let tmp = tempfile::tempdir().unwrap();
         let bd = Bd::new(fake_bd(tmp.path(), r#"echo "$1 $(pwd -P)""#));
-        let out = bd.run(tmp.path(), &["export"]).unwrap();
+        let out = bd.run_on(tmp.path(), &["export"]).unwrap();
         let here = tmp.path().canonicalize().unwrap();
         assert_eq!(out.trim(), format!("export {}", here.display()));
     }
@@ -242,7 +217,7 @@ mod tests {
     fn nonzero_exit_is_an_error_with_stderr() {
         let tmp = tempfile::tempdir().unwrap();
         let bd = Bd::new(fake_bd(tmp.path(), "echo 'no database' >&2; exit 1"));
-        let err = bd.run(tmp.path(), &["export"]).unwrap_err();
+        let err = bd.run_on(tmp.path(), &["export"]).unwrap_err();
         assert!(matches!(err, BdError::Failed { .. }));
         assert!(err.to_string().contains("no database"), "{err}");
     }
@@ -251,23 +226,33 @@ mod tests {
     fn missing_bd_is_an_error() {
         let tmp = tempfile::tempdir().unwrap();
         let err = Bd::new(tmp.path().join("absent"))
-            .run(tmp.path(), &["export"])
+            .run_on(tmp.path(), &["export"])
             .unwrap_err();
         assert!(matches!(err, BdError::Spawn { .. }));
         assert!(err.to_string().contains("absent"), "{err}");
     }
 
     #[test]
-    fn ignores_inherited_beads_location() {
-        let bd = Bd::default();
-        let command = bd.command(Path::new("."), &["export"], Target::Discover);
-        let removed: Vec<_> = command
-            .get_envs()
-            .filter(|(_, value)| value.is_none())
-            .map(|(key, _)| key.to_owned())
-            .collect();
-        assert!(removed.contains(&"BEADS_DIR".into()), "{removed:?}");
-        assert!(removed.contains(&"BEADS_DB".into()), "{removed:?}");
+    fn database_calls_set_beads_dir_and_drop_beads_db() {
+        let command = Bd::default().command(
+            Path::new("/d"),
+            &["export"],
+            Target::Database(Path::new("/d")),
+        );
+        let envs: Vec<_> = command.get_envs().collect();
+        assert!(
+            envs.contains(&("BEADS_DIR".as_ref(), Some("/d".as_ref()))),
+            "{envs:?}"
+        );
+        assert!(envs.contains(&("BEADS_DB".as_ref(), None)), "{envs:?}");
+    }
+
+    #[test]
+    fn lookup_keeps_beads_dir_and_drops_beads_db() {
+        let command = Bd::default().command(Path::new("."), &["context"], Target::Inherit);
+        let envs: Vec<_> = command.get_envs().collect();
+        assert!(envs.contains(&("BEADS_DB".as_ref(), None)), "{envs:?}");
+        assert!(!envs.iter().any(|(key, _)| *key == "BEADS_DIR"), "{envs:?}");
     }
 
     #[test]
@@ -331,7 +316,7 @@ printf '{{"key":"%s","schema_version":1,"value":%s}}\n' "$4" '{value}'"#
         let tmp = tempfile::tempdir().unwrap();
         let bd = config_bd(tmp.path(), r#"" Example Project ""#);
         assert_eq!(
-            bd.config_get(tmp.path(), "custom.obsidian.project")
+            bd.config_get_on(tmp.path(), "custom.obsidian.project")
                 .unwrap()
                 .as_deref(),
             Some("Example Project")
@@ -342,28 +327,28 @@ printf '{{"key":"%s","schema_version":1,"value":%s}}\n' "$4" '{value}'"#
     fn unset_config_is_none() {
         let tmp = tempfile::tempdir().unwrap();
         let bd = config_bd(tmp.path(), r#""""#);
-        assert_eq!(bd.config_get(tmp.path(), "k").unwrap(), None);
+        assert_eq!(bd.config_get_on(tmp.path(), "k").unwrap(), None);
     }
 
     #[test]
     fn null_config_is_none() {
         let tmp = tempfile::tempdir().unwrap();
         let bd = config_bd(tmp.path(), "null");
-        assert_eq!(bd.config_get(tmp.path(), "k").unwrap(), None);
+        assert_eq!(bd.config_get_on(tmp.path(), "k").unwrap(), None);
     }
 
     #[test]
     fn missing_config_value_is_none() {
         let tmp = tempfile::tempdir().unwrap();
         let bd = Bd::new(fake_bd(tmp.path(), r#"echo '{"key":"k"}'"#));
-        assert_eq!(bd.config_get(tmp.path(), "k").unwrap(), None);
+        assert_eq!(bd.config_get_on(tmp.path(), "k").unwrap(), None);
     }
 
     #[test]
     fn keyless_config_is_malformed() {
         let tmp = tempfile::tempdir().unwrap();
         let bd = Bd::new(fake_bd(tmp.path(), r#"echo '{"error":"no"}'"#));
-        let err = bd.config_get(tmp.path(), "k").unwrap_err();
+        let err = bd.config_get_on(tmp.path(), "k").unwrap_err();
         assert!(matches!(err, BdError::Malformed { .. }), "{err:?}");
     }
 
@@ -371,7 +356,7 @@ printf '{{"key":"%s","schema_version":1,"value":%s}}\n' "$4" '{value}'"#
     fn blank_value_is_unset() {
         let tmp = tempfile::tempdir().unwrap();
         let bd = config_bd(tmp.path(), r#""  ""#);
-        assert_eq!(bd.config_get(tmp.path(), "k").unwrap(), None);
+        assert_eq!(bd.config_get_on(tmp.path(), "k").unwrap(), None);
     }
 
     #[test]
@@ -379,7 +364,7 @@ printf '{{"key":"%s","schema_version":1,"value":%s}}\n' "$4" '{value}'"#
         let tmp = tempfile::tempdir().unwrap();
         let bd = config_bd(tmp.path(), r#""x (not set)""#);
         assert_eq!(
-            bd.config_get(tmp.path(), "k").unwrap().as_deref(),
+            bd.config_get_on(tmp.path(), "k").unwrap().as_deref(),
             Some("x (not set)")
         );
     }
@@ -388,7 +373,7 @@ printf '{{"key":"%s","schema_version":1,"value":%s}}\n' "$4" '{value}'"#
     fn non_json_config_is_malformed() {
         let tmp = tempfile::tempdir().unwrap();
         let bd = Bd::new(fake_bd(tmp.path(), "echo 'custom.x (not set)'"));
-        let err = bd.config_get(tmp.path(), "custom.x").unwrap_err();
+        let err = bd.config_get_on(tmp.path(), "custom.x").unwrap_err();
         assert!(matches!(err, BdError::Malformed { .. }), "{err:?}");
         assert!(err.to_string().contains("config get"), "{err}");
     }
@@ -398,40 +383,40 @@ printf '{{"key":"%s","schema_version":1,"value":%s}}\n' "$4" '{value}'"#
         let tmp = tempfile::tempdir().unwrap();
         let bd = Bd::new(fake_bd(tmp.path(), r"printf '\377'"));
         assert!(matches!(
-            bd.run(tmp.path(), &["export"]),
+            bd.run_on(tmp.path(), &["export"]),
             Err(BdError::NotUtf8 { .. })
         ));
     }
 
     #[test]
-    fn context_reads_beads_dir() {
+    fn lookup_reads_beads_dir() {
         let tmp = tempfile::tempdir().unwrap();
         let bd = Bd::new(fake_bd(
             tmp.path(),
             r#"[ "$1 $2" = "context --json" ] || exit 9
 echo '{"backend":"dolt","beads_dir":"/x/.beads","is_redirected":true}'"#,
         ));
-        let context = bd.context(tmp.path()).unwrap();
+        let context = bd.lookup(tmp.path()).unwrap();
         assert_eq!(context.beads_dir, PathBuf::from("/x/.beads"));
     }
 
     #[test]
-    fn context_without_beads_dir_is_malformed() {
+    fn lookup_without_beads_dir_is_malformed() {
         let tmp = tempfile::tempdir().unwrap();
         let bd = Bd::new(fake_bd(tmp.path(), r#"echo '{"backend":"dolt"}'"#));
-        let err = bd.context(tmp.path()).unwrap_err();
+        let err = bd.lookup(tmp.path()).unwrap_err();
         assert!(matches!(err, BdError::Malformed { .. }), "{err:?}");
         assert!(err.to_string().contains("context --json"), "{err}");
     }
 
     #[test]
-    fn context_failure_keeps_stderr() {
+    fn lookup_failure_keeps_stderr() {
         let tmp = tempfile::tempdir().unwrap();
         let bd = Bd::new(fake_bd(
             tmp.path(),
             "echo 'no .beads directory found' >&2; exit 1",
         ));
-        let err = bd.context(tmp.path()).unwrap_err();
+        let err = bd.lookup(tmp.path()).unwrap_err();
         assert!(matches!(err, BdError::Failed { .. }), "{err:?}");
         assert!(
             err.to_string().contains("no .beads directory found"),

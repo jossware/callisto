@@ -73,10 +73,12 @@ $XDG_CONFIG_HOME/callisto/config.toml
 
 ```toml
 vault = "~/org"
-repos = [
-  "~/Workspaces/callisto",
-  "~/Workspaces/ganymede",
-]
+
+[[databases]]
+beads_dir = "~/Workspaces/callisto/.beads"
+
+[[databases]]
+beads_dir = "~/Workspaces/ganymede/.beads"
 ```
 
 | Key | |
@@ -106,14 +108,15 @@ A table entry claims beads by that field:
 
 ```toml
 vault = "~/org"
-field = "metadata.repo"
 unfiled = "Inbox/Beads"
-repos = [
-  "~/Workspaces/callisto",
-  { path = "~/work/api", value = "github.com/example/api", project = "API" },
-  { path = "~/work/web", value = ["github.com/example/web", "github.com/example/www"] },
-  { path = "~/work/tools" },
-]
+
+[[databases]]
+beads_dir = "~/Workspaces/callisto/.beads"
+
+[[databases]]
+beads_dir = "~/work/tasksdb/.beads"
+split.by = "metadata.repo"
+split.projects = { "github.com/example/api" = "API" }
 ```
 
 Here callisto has a database of its own. The three work repos share

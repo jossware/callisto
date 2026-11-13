@@ -1,6 +1,6 @@
-//! The index note for beads no table entry claims.
+//! The index note for beads a split database cannot file.
 
-use crate::claim::{Reason, Unclaimed};
+use crate::claim::{Reason, Unfiled};
 use crate::field_path::FieldPath;
 use crate::filename::ILLEGAL;
 use crate::render::escape::label;
@@ -16,7 +16,7 @@ pub fn file_name(prefix: &str) -> String {
     format!("Unfiled beads - {safe}.md")
 }
 
-pub fn index(prefix: &str, field: &FieldPath, unclaimed: &[Unclaimed]) -> String {
+pub fn index(prefix: &str, field: &FieldPath, unfiled: &[Unfiled]) -> String {
     let mut out = format!(
         "---\n{MARKER_KEY}: {MARKER_VALUE}\nbeadPrefix: {}\nobsidianUIMode: preview\n---\n\n\
          > [!info] Beads no repo claims · {}\n\
@@ -24,11 +24,11 @@ pub fn index(prefix: &str, field: &FieldPath, unclaimed: &[Unclaimed]) -> String
         scalar(prefix),
         label(prefix),
     );
-    if unclaimed.is_empty() {
+    if unfiled.is_empty() {
         out.push_str("No unclaimed beads.\n");
         return out;
     }
-    let mut rows: Vec<&Unclaimed> = unclaimed.iter().collect();
+    let mut rows: Vec<&Unfiled> = unfiled.iter().collect();
     rows.sort_by(|a, b| {
         (a.status == "closed")
             .cmp(&(b.status == "closed"))
@@ -61,8 +61,8 @@ mod tests {
     use super::*;
     use crate::fields;
 
-    fn u(id: &str, status: &str, reason: Reason) -> Unclaimed {
-        Unclaimed {
+    fn u(id: &str, status: &str, reason: Reason) -> Unfiled {
+        Unfiled {
             id: id.into(),
             title: format!("title {id}"),
             status: status.into(),
@@ -74,7 +74,7 @@ mod tests {
         "metadata.repo".parse().unwrap()
     }
 
-    fn five() -> Vec<Unclaimed> {
+    fn five() -> Vec<Unfiled> {
         vec![
             u("zz-10", "closed", Reason::Value("o/z".into())),
             u("zz-2", "open", Reason::NoField),

@@ -50,7 +50,7 @@ fn is_scaffolding(record: &Record) -> bool {
         || SCAFFOLDING_TYPES.contains(&record.bead.issue_type.as_str())
 }
 
-/// One repo's export, split by whether a bead gets a note.
+/// One database's export, split by whether a bead gets a note.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Export {
     pub beads: Vec<Bead>,
@@ -141,19 +141,19 @@ impl From<ParseError> for ExportError {
     }
 }
 
-/// Exports every bead in the repo at `checkout`. Any failure means the
-/// export is not authoritative and the repo's sync MUST stop.
-pub fn export(bd: &Bd, checkout: &Path) -> Result<Export, ExportError> {
-    export_with_field(bd, checkout, None)
+/// Exports every bead in the database at `database`. Any failure means
+/// the export is not authoritative and the database's sync MUST stop.
+pub fn export(bd: &Bd, database: &Path) -> Result<Export, ExportError> {
+    export_with_field(bd, database, None)
 }
 
 /// Like [`export`], also resolving `field` on every bead that gets a note.
 pub fn export_with_field(
     bd: &Bd,
-    checkout: &Path,
+    database: &Path,
     field: Option<&FieldPath>,
 ) -> Result<Export, ExportError> {
-    let jsonl = bd.run(checkout, &["export"])?;
+    let jsonl = bd.run_on(database, &["export"])?;
     Ok(parse_with_field(&jsonl, field)?)
 }
 

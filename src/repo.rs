@@ -28,11 +28,11 @@ impl Repo {
     }
 }
 
-/// What a repo's bd config says about syncing it.
+/// What a database's bd config says about syncing it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
     pub prefix: String,
-    /// The vault project to file under, when it is not the repo's name.
+    /// The vault project to file under, when it is not the default name.
     pub project: Option<String>,
 }
 
@@ -66,12 +66,13 @@ impl From<BdError> for SettingsError {
     }
 }
 
-/// A repo without a prefix is an error: no note could be scoped to it.
-pub fn settings(bd: &Bd, repo: &Repo) -> Result<Settings, SettingsError> {
+/// A database without a prefix is an error: no note could be scoped to
+/// it.
+pub fn settings(bd: &Bd, database: &Path) -> Result<Settings, SettingsError> {
     let prefix = bd
-        .config_get(&repo.root, PREFIX_KEY)?
+        .config_get_on(database, PREFIX_KEY)?
         .ok_or(SettingsError::NoPrefix)?;
-    let project = bd.config_get(&repo.root, PROJECT_KEY)?;
+    let project = bd.config_get_on(database, PROJECT_KEY)?;
     Ok(Settings { prefix, project })
 }
 
@@ -573,8 +574,8 @@ mod tests {
         }
     }
 
-    /// Answers `config get --json <key>` from `pairs` and records each run's
-    /// directory in `<dir>/pwd`.
+    /// Answers `config get --json <key>` from `pairs` and records each
+    /// run's `BEADS_DIR` in `<dir>/dirs`.
     fn config_bd(dir: &Path, pairs: &[(&str, &str)]) -> Bd {
         let mut cases = String::new();
         for (key, value) in pairs {
@@ -583,60 +584,52 @@ mod tests {
         Bd::new(fake_bd(
             dir,
             &format!(
-                r#"pwd -P >> "{log}"
+                r#"echo "$BEADS_DIR" >> "{log}"
 case "$4" in
 {cases}  *) v='' ;;
 esac
 printf '{{"key":"%s","schema_version":1,"value":"%s"}}\n' "$4" "$v""#,
-                log = dir.join("pwd").display()
+                log = dir.join("dirs").display()
             ),
         ))
     }
 
     #[test]
-    fn settings_run_in_the_main_checkout() {
+    fn settings_read_the_named_database() {
         let root = tmp();
-        let main = root.path().join("main");
-        let wt = root.path().join("wt");
-        mkdir(&main.join(".git"));
-        link_worktree(&main.join(".git"), &wt);
+        let db = root.path().join("db");
+        mkdir(&db);
         let bd = config_bd(
             root.path(),
             &[(PREFIX_KEY, "zz"), (PROJECT_KEY, "Example Project")],
         );
-        let found = locate(&wt).unwrap();
         assert_eq!(
-            settings(&bd, &found).unwrap(),
+            settings(&bd, &db).unwrap(),
             Settings {
                 prefix: "zz".into(),
                 project: Some("Example Project".into()),
             }
         );
-        let pwds = fs::read_to_string(root.path().join("pwd")).unwrap();
-        let main = main.canonicalize().unwrap();
-        assert_eq!(pwds.lines().count(), 2);
-        for pwd in pwds.lines() {
-            assert_eq!(Path::new(pwd), main);
+        let dirs = fs::read_to_string(root.path().join("dirs")).unwrap();
+        assert_eq!(dirs.lines().count(), 2);
+        for dir in dirs.lines() {
+            assert_eq!(Path::new(dir), db);
         }
     }
 
     #[test]
     fn settings_without_override() {
         let root = tmp();
-        let proj = root.path().join("proj");
-        mkdir(&proj.join(".git"));
         let bd = config_bd(root.path(), &[(PREFIX_KEY, "zz")]);
-        let got = settings(&bd, &locate(&proj).unwrap()).unwrap();
+        let got = settings(&bd, root.path()).unwrap();
         assert_eq!(got.project, None);
     }
 
     #[test]
     fn missing_prefix_is_an_error() {
         let root = tmp();
-        let proj = root.path().join("proj");
-        mkdir(&proj.join(".git"));
         let bd = config_bd(root.path(), &[(PROJECT_KEY, "x")]);
-        let err = settings(&bd, &locate(&proj).unwrap()).unwrap_err();
+        let err = settings(&bd, root.path()).unwrap_err();
         assert!(matches!(err, SettingsError::NoPrefix), "{err:?}");
         assert!(err.to_string().contains("issue_prefix"), "{err}");
     }
@@ -644,10 +637,8 @@ printf '{{"key":"%s","schema_version":1,"value":"%s"}}\n' "$4" "$v""#,
     #[test]
     fn bd_failure_is_an_error() {
         let root = tmp();
-        let proj = root.path().join("proj");
-        mkdir(&proj.join(".git"));
         let bd = Bd::new(fake_bd(root.path(), "echo 'no database' >&2; exit 1"));
-        let err = settings(&bd, &locate(&proj).unwrap()).unwrap_err();
+        let err = settings(&bd, root.path()).unwrap_err();
         assert!(
             matches!(err, SettingsError::Bd(BdError::Failed { .. })),
             "{err:?}"

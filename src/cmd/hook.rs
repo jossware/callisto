@@ -1,4 +1,5 @@
-//! `callisto hook`: sync the repo a harness Stop hook names on stdin.
+//! `callisto hook`: sync the database of the repo a harness Stop hook
+//! names on stdin.
 //!
 //! A hook MUST NOT disturb the harness. Every path exits 0, stdout stays
 //! empty, and failures go to the error log only. Stream writes ignore
@@ -14,18 +15,17 @@ use jiff::tz::TimeZone;
 use serde_json::Value;
 
 use crate::bd::Bd;
-use crate::cmd::sync::{Plan, plan};
 use crate::config::{self, Config, VaultError};
+use crate::database::{self, Databases, Target};
 use crate::errlog::{self, Entry, Stage};
-use crate::group::Groups;
 use crate::lock;
 use crate::paths::{self, Env};
-use crate::remote::Git;
 use crate::repo;
 use crate::standing::{self, Subject, Summary};
 use crate::sync::{self, Request};
 
-/// The repo being synced: the panic hook's only view of the run.
+/// The repo or database being synced: the panic hook's only view of the
+/// run.
 static REPO: Mutex<Option<PathBuf>> = Mutex::new(None);
 
 /// The payload's `cwd`. Claude Code and Codex both send one; nothing
@@ -64,8 +64,9 @@ pub fn run(vault: Option<&Path>, env: &Env, bd: &Bd, stdin: &mut dyn Read, err: 
         Ok(cwd) => cwd,
         Err(e) => return fail(env, None, Stage::Payload, e, err),
     };
-    // Before the config, so a repo without beads costs nothing.
-    let Some(repo) = repo::locate(&cwd).filter(|r| r.has_beads()) else {
+    // Before the config, so a repo without beads costs nothing. With
+    // BEADS_DIR set, bd may still find a database for it.
+    let Some(repo) = repo::locate(&cwd).filter(|r| r.has_beads() || env.beads_dir) else {
         return;
     };
     let root = Some(repo.root.as_path());
@@ -102,53 +103,39 @@ pub fn run(vault: Option<&Path>, env: &Env, bd: &Bd, stdin: &mut dyn Read, err: 
         Err(lock::Error::Locked) => return,
         Err(e) => return fail(env, root, Stage::Lock, e.to_string(), err),
     };
-    let mut groups = Groups::derive(bd, &config.repos);
-    groups.read_prefixes(bd);
-    groups.resolve(&Git::default());
-    let mut summaries = vec![standing::config_summary(groups.conditions())];
-    let (synced, group) = match groups.of_target(bd, &repo) {
-        Ok(Some(group)) => (group.representative(Some(&repo)), Some(group)),
-        Ok(None) => (&repo, None),
+    let mut databases = Databases::new(&config.databases);
+    let found = database::find(bd, &databases, &repo);
+    let database = match found {
+        Ok(Target::Configured(database) | Target::Local(database)) => Some(database),
+        // Not the checkout's own `.beads`, so it has no name to file
+        // under; `sync` reports it.
+        Ok(Target::Unconfigured(_)) => return,
         Err(e) => {
             fail(env, root, Stage::Config, e.to_string(), err);
-            standing::record(&lock, state, "hook", &summaries);
-            return;
+            None
         }
     };
-    let subject = match group {
-        Some(group) => Subject::group(group),
-        None => Subject::Checkout(repo.root.clone()),
-    };
-    let (claims, degraded) = match plan(&groups, group, group.is_some()) {
-        Plan::Sync { claims, degraded } => (claims, degraded),
-        Plan::Skip(condition) => {
-            summaries.push(Summary {
-                subject,
-                conditions: vec![condition],
-            });
-            standing::record(&lock, state, "hook", &summaries);
-            return;
+    databases.read_prefixes(bd);
+    let mut summaries = vec![standing::config_summary(databases.conditions())];
+    if let Some(database) = &database {
+        *REPO.lock().unwrap_or_else(|e| e.into_inner()) = Some(database.dir.clone());
+        let scope = databases.scope();
+        let req = Request {
+            bd,
+            vault: &vault,
+            database,
+            scope: &scope,
+            tz: &TimeZone::system(),
+            unfiled: &config.unfiled,
+        };
+        // Warnings are dropped: they recur every turn, and `sync` shows them.
+        match sync::sync_database(&lock, &req) {
+            Ok(report) => summaries.push(Summary {
+                subject: Subject::Database(database.dir.clone()),
+                conditions: report.conditions,
+            }),
+            Err(e) => fail(env, Some(&database.dir), e.stage(), e.to_string(), err),
         }
-    };
-    *REPO.lock().unwrap_or_else(|e| e.into_inner()) = Some(synced.root.clone());
-    let scope = groups.scope();
-    let req = Request {
-        bd,
-        vault: &vault,
-        repo: synced,
-        scope: &scope,
-        tz: &TimeZone::system(),
-        claims,
-        degraded,
-        unfiled: &config.unfiled,
-    };
-    // Warnings are dropped: they recur every turn, and `sync` shows them.
-    match sync::sync_repo(&lock, &req) {
-        Ok(report) => summaries.push(Summary {
-            subject,
-            conditions: report.conditions,
-        }),
-        Err(e) => fail(env, Some(&synced.root), e.stage(), e.to_string(), err),
     }
     standing::record(&lock, state, "hook", &summaries);
 }
@@ -241,6 +228,7 @@ mod tests {
             home: None,
             config: None,
             state: None,
+            beads_dir: false,
         };
         let mut err = Vec::new();
         fail(&env, None, Stage::Payload, "boom".into(), &mut err);

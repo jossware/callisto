@@ -13,15 +13,21 @@ pub struct Env {
     pub config: Option<PathBuf>,
     /// `<state>/callisto`, holding the error log and the sync lock.
     pub state: Option<PathBuf>,
+    /// `BEADS_DIR` is set and not empty, so bd may find a database for a
+    /// checkout without a `.beads` of its own.
+    pub beads_dir: bool,
 }
 
 impl Env {
     pub fn read() -> Env {
-        Env::from_vars(
-            env::var_os("HOME"),
-            env::var_os("XDG_CONFIG_HOME"),
-            env::var_os("XDG_STATE_HOME"),
-        )
+        Env {
+            beads_dir: env::var_os("BEADS_DIR").is_some_and(|v| !v.is_empty()),
+            ..Env::from_vars(
+                env::var_os("HOME"),
+                env::var_os("XDG_CONFIG_HOME"),
+                env::var_os("XDG_STATE_HOME"),
+            )
+        }
     }
 
     pub fn from_vars(
@@ -43,6 +49,7 @@ impl Env {
             home,
             config,
             state,
+            beads_dir: false,
         }
     }
 }
@@ -95,6 +102,7 @@ mod tests {
                 home: Some("/h".into()),
                 config: Some("/h/.config/callisto".into()),
                 state: Some("/h/.local/state/callisto".into()),
+                beads_dir: false,
             }
         );
     }
@@ -120,6 +128,7 @@ mod tests {
             home: None,
             config: None,
             state: None,
+            beads_dir: false,
         };
         assert_eq!(env(Some(""), None, None), none);
         assert_eq!(env(None, None, None), none);

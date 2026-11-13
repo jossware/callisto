@@ -5,7 +5,6 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use crate::errlog::{self, Entry, Stage};
-use crate::group::Group;
 use crate::lock::Lock;
 use crate::paths;
 
@@ -13,7 +12,7 @@ const SHOWN_IDS: usize = 3;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Condition {
-    Unclaimed {
+    Unfiled {
         ids: Vec<String>,
     },
     MissingProject {
@@ -26,13 +25,6 @@ pub enum Condition {
     IndexTaken {
         path: PathBuf,
     },
-    Unresolvable {
-        path: PathBuf,
-        reason: String,
-    },
-    GroupRule {
-        reason: String,
-    },
     SharedPrefix {
         prefix: String,
         databases: Vec<PathBuf>,
@@ -41,7 +33,6 @@ pub enum Condition {
         database: PathBuf,
         reason: String,
     },
-    UnlistedSkipped,
 }
 
 type OrderKey = (u8, String, String, Vec<String>);
@@ -50,21 +41,18 @@ impl Condition {
     pub fn fails_sync(&self) -> bool {
         !matches!(
             self,
-            Condition::Unclaimed { .. } | Condition::MissingProject { .. }
+            Condition::Unfiled { .. } | Condition::MissingProject { .. }
         )
     }
 
     fn rank(&self) -> u8 {
         match self {
-            Condition::Unclaimed { .. } => 0,
+            Condition::Unfiled { .. } => 0,
             Condition::MissingProject { .. } => 1,
             Condition::UnfiledMissing { .. } => 2,
             Condition::IndexTaken { .. } => 3,
-            Condition::Unresolvable { .. } => 4,
-            Condition::GroupRule { .. } => 5,
-            Condition::SharedPrefix { .. } => 6,
-            Condition::Unreadable { .. } => 7,
-            Condition::UnlistedSkipped => 8,
+            Condition::SharedPrefix { .. } => 4,
+            Condition::Unreadable { .. } => 5,
         }
     }
 
@@ -72,7 +60,7 @@ impl Condition {
         let rank = self.rank();
         let none = String::new;
         match self {
-            Condition::Unclaimed { ids } => (rank, none(), none(), sorted_ids(ids)),
+            Condition::Unfiled { ids } => (rank, none(), none(), sorted_ids(ids)),
             Condition::MissingProject { project, ids } => {
                 (rank, project.clone(), none(), sorted_ids(ids))
             }
@@ -80,10 +68,6 @@ impl Condition {
                 (rank, folder.display().to_string(), none(), vec![])
             }
             Condition::IndexTaken { path } => (rank, path.display().to_string(), none(), vec![]),
-            Condition::Unresolvable { path, reason } => {
-                (rank, path.display().to_string(), reason.clone(), vec![])
-            }
-            Condition::GroupRule { reason } => (rank, none(), reason.clone(), vec![]),
             Condition::SharedPrefix { prefix, databases } => (
                 rank,
                 prefix.clone(),
@@ -93,16 +77,15 @@ impl Condition {
             Condition::Unreadable { database, reason } => {
                 (rank, database.display().to_string(), reason.clone(), vec![])
             }
-            Condition::UnlistedSkipped => (rank, none(), none(), vec![]),
         }
     }
 
     fn text(&self) -> String {
         match self {
-            Condition::Unclaimed { ids } => {
+            Condition::Unfiled { ids } => {
                 let (count, shown) = summarize_ids(ids);
                 let noun = if count == 1 { "bead" } else { "beads" };
-                format!("{count} unclaimed {noun} ({shown})")
+                format!("{count} unfiled {noun} ({shown})")
             }
             Condition::MissingProject { project, ids } => {
                 let (count, shown) = summarize_ids(ids);
@@ -117,10 +100,6 @@ impl Condition {
                 "\"{}\" exists and callisto did not write it; index not written",
                 path.display()
             ),
-            Condition::Unresolvable { path, reason } => {
-                format!("table entry {} is unresolvable: {reason}", path.display())
-            }
-            Condition::GroupRule { reason } => format!("group not synced: {reason}"),
             Condition::SharedPrefix { prefix, databases } => {
                 let dirs = databases
                     .iter()
@@ -132,50 +111,36 @@ impl Condition {
             Condition::Unreadable { database, reason } => {
                 format!("database {} cannot be read: {reason}", database.display())
             }
-            Condition::UnlistedSkipped => {
-                "not in repos and a table entry is unresolvable; nothing synced".to_string()
-            }
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Subject {
-    Group { database: PathBuf, repo: PathBuf },
     Config,
-    Checkout(PathBuf),
     Database(PathBuf),
 }
 
 impl Subject {
-    pub fn group(group: &Group) -> Subject {
-        Subject::Group {
-            database: group.database.clone(),
-            repo: group.members[0].root.clone(),
-        }
-    }
-
     pub fn key(&self) -> String {
         match self {
-            Subject::Group { database, .. } => format!("group:{}", database.display()),
             Subject::Config => "config".to_string(),
-            Subject::Checkout(root) => format!("checkout:{}", root.display()),
             Subject::Database(dir) => format!("database:{}", dir.display()),
         }
     }
 
     pub fn label(&self) -> String {
         match self {
-            Subject::Group { repo, .. } => repo.display().to_string(),
             Subject::Config => "config".to_string(),
-            Subject::Checkout(root) | Subject::Database(root) => root.display().to_string(),
+            Subject::Database(dir) => dir.display().to_string(),
         }
     }
 
+    /// The error log's `repo` field.
     pub fn repo(&self) -> Option<&Path> {
         match self {
-            Subject::Group { repo, .. } | Subject::Database(repo) => Some(repo),
-            _ => None,
+            Subject::Config => None,
+            Subject::Database(dir) => Some(dir),
         }
     }
 }
@@ -346,8 +311,8 @@ mod tests {
         v.iter().map(|s| s.to_string()).collect()
     }
 
-    fn unclaimed(v: &[&str]) -> Condition {
-        Condition::Unclaimed { ids: ids(v) }
+    fn unfiled(v: &[&str]) -> Condition {
+        Condition::Unfiled { ids: ids(v) }
     }
 
     fn summary(conditions: Vec<Condition>) -> Summary {
@@ -370,11 +335,6 @@ mod tests {
             Condition::IndexTaken {
                 path: "i.md".into(),
             },
-            Condition::Unresolvable {
-                path: "/w".into(),
-                reason: "r".into(),
-            },
-            Condition::GroupRule { reason: "r".into() },
             Condition::SharedPrefix {
                 prefix: "p".into(),
                 databases: vec!["/a".into(), "/b".into()],
@@ -383,12 +343,11 @@ mod tests {
                 database: "/d".into(),
                 reason: "r".into(),
             },
-            Condition::UnlistedSkipped,
         ];
         for c in failing {
             assert!(c.fails_sync(), "{c:?}");
         }
-        assert!(!unclaimed(&["w-1"]).fails_sync());
+        assert!(!unfiled(&["w-1"]).fails_sync());
         let missing = Condition::MissingProject {
             project: "P".into(),
             ids: ids(&["w-1"]),
@@ -399,21 +358,23 @@ mod tests {
     #[test]
     fn any_fails_checks_every_summary() {
         assert!(!any_fails(&[]));
-        let quiet = summary(vec![unclaimed(&["w-1"])]);
+        let quiet = summary(vec![unfiled(&["w-1"])]);
         assert!(!quiet.fails_sync());
         assert!(!any_fails(std::slice::from_ref(&quiet)));
-        let loud = summary(vec![Condition::GroupRule { reason: "r".into() }]);
+        let loud = summary(vec![Condition::UnfiledMissing {
+            folder: "Inbox".into(),
+        }]);
         assert!(loud.fails_sync());
         assert!(any_fails(&[quiet, loud]));
     }
 
     #[test]
-    fn unclaimed_text() {
+    fn unfiled_text() {
         assert_eq!(
-            text(unclaimed(&["w-7", "w-1", "w-2", "w-9"])),
-            "4 unclaimed beads (w-1, w-2, w-7, …)"
+            text(unfiled(&["w-7", "w-1", "w-2", "w-9"])),
+            "4 unfiled beads (w-1, w-2, w-7, …)"
         );
-        assert_eq!(text(unclaimed(&["w-1"])), "1 unclaimed bead (w-1)");
+        assert_eq!(text(unfiled(&["w-1"])), "1 unfiled bead (w-1)");
     }
 
     #[test]
@@ -431,16 +392,16 @@ mod tests {
     #[test]
     fn ids_sort_naturally() {
         assert_eq!(
-            text(unclaimed(&["w-10", "w-2", "w-3.10", "w-3.2"])),
-            "4 unclaimed beads (w-2, w-3.2, w-3.10, …)"
+            text(unfiled(&["w-10", "w-2", "w-3.10", "w-3.2"])),
+            "4 unfiled beads (w-2, w-3.2, w-3.10, …)"
         );
     }
 
     #[test]
     fn ids_sort_past_leading_zeros() {
         assert_eq!(
-            text(unclaimed(&["w-2", "w-1", "w-01"])),
-            "3 unclaimed beads (w-01, w-1, w-2)"
+            text(unfiled(&["w-2", "w-1", "w-01"])),
+            "3 unfiled beads (w-01, w-1, w-2)"
         );
     }
 
@@ -455,7 +416,7 @@ mod tests {
 
     #[test]
     fn ids_dedupe() {
-        assert_eq!(text(unclaimed(&["w-1", "w-1"])), "1 unclaimed bead (w-1)");
+        assert_eq!(text(unfiled(&["w-1", "w-1"])), "1 unfiled bead (w-1)");
     }
 
     #[test]
@@ -473,17 +434,6 @@ mod tests {
             "\"Inbox/Unfiled beads - w.md\" exists and callisto did not write it; index not written"
         );
         assert_eq!(
-            text(Condition::Unresolvable {
-                path: "/w/x".into(),
-                reason: "no origin remote".into()
-            }),
-            "table entry /w/x is unresolvable: no origin remote"
-        );
-        assert_eq!(
-            text(Condition::GroupRule { reason: "r".into() }),
-            "group not synced: r"
-        );
-        assert_eq!(
             text(Condition::SharedPrefix {
                 prefix: "p".into(),
                 databases: vec!["/a/.beads".into(), "/b/.beads".into()],
@@ -497,16 +447,15 @@ mod tests {
             }),
             "database /a/.beads cannot be read: no such directory"
         );
-        assert_eq!(
-            text(Condition::UnlistedSkipped),
-            "not in repos and a table entry is unresolvable; nothing synced"
-        );
     }
 
     #[test]
     fn mixed_conditions_render_in_fixed_order() {
         let a = vec![
-            Condition::GroupRule { reason: "r".into() },
+            Condition::Unreadable {
+                database: "/d".into(),
+                reason: "r".into(),
+            },
             Condition::MissingProject {
                 project: "B".into(),
                 ids: ids(&["w-2"]),
@@ -515,24 +464,24 @@ mod tests {
                 project: "A".into(),
                 ids: ids(&["w-1"]),
             },
-            unclaimed(&["w-9"]),
-            Condition::Unresolvable {
-                path: "/b".into(),
-                reason: "x".into(),
+            unfiled(&["w-9"]),
+            Condition::SharedPrefix {
+                prefix: "q".into(),
+                databases: vec!["/b".into(), "/c".into()],
             },
-            Condition::Unresolvable {
-                path: "/a".into(),
-                reason: "y".into(),
+            Condition::SharedPrefix {
+                prefix: "p".into(),
+                databases: vec!["/a".into(), "/b".into()],
             },
         ];
         let mut b = a.clone();
         b.reverse();
-        let expected = "1 unclaimed bead (w-9); \
+        let expected = "1 unfiled bead (w-9); \
             1 bead claimed for missing project \"A\" (w-1); \
             1 bead claimed for missing project \"B\" (w-2); \
-            table entry /a is unresolvable: y; \
-            table entry /b is unresolvable: x; \
-            group not synced: r";
+            prefix \"p\" is used by /a, /b; removed beads were not marked; \
+            prefix \"q\" is used by /b, /c; removed beads were not marked; \
+            database /d cannot be read: r";
         assert_eq!(summary(a).text(), expected);
         assert_eq!(summary(b).text(), expected);
     }
@@ -544,19 +493,9 @@ mod tests {
 
     #[test]
     fn subject_keys() {
-        let g = Subject::Group {
-            database: PathBuf::from("/d/.beads"),
-            repo: PathBuf::from("/r"),
-        };
-        assert_eq!(g.key(), "group:/d/.beads");
-        assert_eq!(g.label(), "/r");
-        assert_eq!(g.repo(), Some(std::path::Path::new("/r")));
         assert_eq!(Subject::Config.key(), "config");
         assert_eq!(Subject::Config.label(), "config");
         assert_eq!(Subject::Config.repo(), None);
-        let c = Subject::Checkout(PathBuf::from("/c"));
-        assert_eq!(c.key(), "checkout:/c");
-        assert_eq!(c.label(), "/c");
         let d = Subject::Database(PathBuf::from("/d/.beads"));
         assert_eq!(d.key(), "database:/d/.beads");
         assert_eq!(d.label(), "/d/.beads");
@@ -571,16 +510,13 @@ mod tests {
 
     use crate::{errlog, lock, paths};
 
-    fn group(repo: &str, v: &[&str]) -> Summary {
+    fn database(dir: &str, v: &[&str]) -> Summary {
         Summary {
-            subject: Subject::Group {
-                database: "/db".into(),
-                repo: repo.into(),
-            },
+            subject: Subject::Database(dir.into()),
             conditions: if v.is_empty() {
                 vec![]
             } else {
-                vec![unclaimed(v)]
+                vec![unfiled(v)]
             },
         }
     }
@@ -626,7 +562,7 @@ mod tests {
     #[test]
     fn first_summary_logs_and_saves() {
         let f = Fixture::new();
-        let s = group("/r", &["a-1"]);
+        let s = database("/r", &["a-1"]);
         assert_eq!(f.record(std::slice::from_ref(&s)), "");
         let entries = f.entries();
         assert_eq!(entries.len(), 1);
@@ -645,7 +581,7 @@ mod tests {
     #[test]
     fn same_summary_logs_once() {
         let f = Fixture::new();
-        let s = [group("/r", &["a-1"])];
+        let s = [database("/r", &["a-1"])];
         f.record(&s);
         let before = fs::read(paths::conditions_state(f.state())).unwrap();
         f.record(&s);
@@ -659,29 +595,29 @@ mod tests {
     #[test]
     fn changed_summary_logs_again() {
         let f = Fixture::new();
-        f.record(&[group("/r", &["a-1"])]);
-        f.record(&[group("/r", &["a-2"])]);
+        f.record(&[database("/r", &["a-1"])]);
+        f.record(&[database("/r", &["a-2"])]);
         assert_eq!(f.entries().len(), 2);
     }
 
     #[test]
     fn cleared_subject_logs_once_and_drops_key() {
         let f = Fixture::new();
-        f.record(&[group("/r", &["a-1"])]);
-        f.record(&[group("/r", &[])]);
+        f.record(&[database("/r", &["a-1"])]);
+        f.record(&[database("/r", &[])]);
         let entries = f.entries();
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[1].error, "standing conditions cleared");
         assert_eq!(entries[1].repo.as_deref(), Some(Path::new("/r")));
         assert!(f.saved().is_empty());
-        f.record(&[group("/r", &[])]);
+        f.record(&[database("/r", &[])]);
         assert_eq!(f.entries().len(), 2);
     }
 
     #[test]
     fn empty_without_state_writes_nothing() {
         let f = Fixture::new();
-        f.record(&[group("/r", &[])]);
+        f.record(&[database("/r", &[])]);
         assert!(!paths::conditions_state(f.state()).exists());
         assert!(!paths::error_log(f.state()).exists());
     }
@@ -689,7 +625,7 @@ mod tests {
     #[test]
     fn record_keeps_subjects_not_passed() {
         let f = Fixture::new();
-        let a = group("/a", &["a-1"]);
+        let a = database("/a", &["a-1"]);
         let seed = format!("{{\"{}\":\"old\",\"other\":\"kept\"}}", a.subject.key());
         fs::write(paths::conditions_state(f.state()), seed).unwrap();
         f.record(std::slice::from_ref(&a));
@@ -702,7 +638,7 @@ mod tests {
     fn record_treats_corrupt_state_as_empty() {
         let f = Fixture::new();
         fs::write(paths::conditions_state(f.state()), "not json").unwrap();
-        let s = group("/r", &["a-1"]);
+        let s = database("/r", &["a-1"]);
         f.record(std::slice::from_ref(&s));
         assert_eq!(f.entries().len(), 1);
         assert_eq!(f.saved(), BTreeMap::from([(s.subject.key(), s.text())]));
@@ -713,7 +649,7 @@ mod tests {
         for seed in ["[1]", "{\"k\":1}"] {
             let f = Fixture::new();
             fs::write(paths::conditions_state(f.state()), seed).unwrap();
-            let s = group("/r", &["a-1"]);
+            let s = database("/r", &["a-1"]);
             f.record(std::slice::from_ref(&s));
             assert_eq!(f.entries().len(), 1, "{seed}");
             assert_eq!(f.saved(), BTreeMap::from([(s.subject.key(), s.text())]));
@@ -726,7 +662,7 @@ mod tests {
         let target = paths::conditions_state(f.state());
         fs::create_dir(&target).unwrap();
         fs::write(target.join("x"), "x").unwrap();
-        let err = f.record(&[group("/r", &["a-1"])]);
+        let err = f.record(&[database("/r", &["a-1"])]);
         assert!(err.starts_with("callisto: couldn't write "), "{err}");
         assert_eq!(f.entries().len(), 1);
     }
@@ -734,19 +670,19 @@ mod tests {
     #[test]
     fn failed_append_leaves_the_subject_as_saved() {
         let f = Fixture::new();
-        f.record(&[group("/r", &["a-1"])]);
+        f.record(&[database("/r", &["a-1"])]);
         let before = f.saved();
         let log = paths::error_log(f.state());
         let kept = fs::read(&log).unwrap();
         fs::remove_file(&log).unwrap();
         fs::create_dir(&log).unwrap();
-        f.record(&[group("/r", &["a-2"])]);
+        f.record(&[database("/r", &["a-2"])]);
         assert_eq!(f.saved(), before);
-        f.record(&[group("/r", &[])]);
+        f.record(&[database("/r", &[])]);
         assert_eq!(f.saved(), before);
         fs::remove_dir(&log).unwrap();
         fs::write(&log, kept).unwrap();
-        f.record(&[group("/r", &["a-2"])]);
+        f.record(&[database("/r", &["a-2"])]);
         let entries = f.entries();
         assert_eq!(entries.len(), 2);
         assert!(entries[1].error.contains("a-2"), "{}", entries[1].error);
