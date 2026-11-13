@@ -155,6 +155,9 @@ A database with no `split` files every bead under one project:
 
 3. else the name of the directory that holds `beads_dir`. So
    `~/.dotfiles/.beads` defaults to `.dotfiles`.
+   A name starting with `.` never matches a folder, because the vault scan
+   skips dot-prefixed folders. For such a database, set `project` or
+   `custom.obsidian.project`.
 
 A split database files each bead by the value at `split.by`:
 
