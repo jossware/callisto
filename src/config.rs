@@ -1,25 +1,26 @@
-//! The config file: which repos callisto syncs and where the vault is.
+//! The config file: which databases callisto syncs and where the vault
+//! is.
 
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
-use serde::de::value::MapAccessDeserializer;
-use serde::{Deserialize, Deserializer, de};
+use serde::Deserialize;
 
+use crate::field_path::FieldPath;
 use crate::paths::expand_tilde;
 
 const DEFAULT_UNFILED: &str = "Inbox";
 
-/// Vault and repo paths are expanded and absolute. `unfiled` is relative
-/// to the vault.
+/// Vault and database paths are expanded and absolute. `unfiled` is
+/// relative to the vault.
 #[derive(Debug, PartialEq)]
 pub struct Config {
     pub vault: Option<PathBuf>,
-    pub repos: Vec<RepoEntry>,
-    pub field: Option<String>,
+    pub databases: Vec<DatabaseEntry>,
     pub unfiled: PathBuf,
 }
 
@@ -27,117 +28,54 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             vault: None,
-            repos: Vec::new(),
-            field: None,
+            databases: Vec::new(),
             unfiled: PathBuf::from(DEFAULT_UNFILED),
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum RepoEntry {
-    Path(PathBuf),
-    Table(TableEntry),
-}
-
-impl RepoEntry {
-    pub fn path(&self) -> &Path {
-        match self {
-            RepoEntry::Path(path) => path,
-            RepoEntry::Table(table) => &table.path,
-        }
-    }
+pub struct DatabaseEntry {
+    pub beads_dir: PathBuf,
+    pub filing: Filing,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct TableEntry {
-    pub path: PathBuf,
-    pub field: String,
-    // `None` means resolved at sync time.
-    pub value: Option<Vec<String>>,
-    // `None` means resolved at sync time.
-    pub project: Option<String>,
+pub enum Filing {
+    Single { project: Option<String> },
+    Split(Split),
 }
 
-// A typo like `repo =` must fail loudly rather than empty the repo list.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Split {
+    pub by: FieldPath,
+    pub projects: BTreeMap<String, String>,
+}
+
+// A typo like `database =` must fail loudly rather than empty the list.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Raw {
     vault: Option<PathBuf>,
     #[serde(default)]
-    repos: Vec<RawEntry>,
-    field: Option<String>,
+    databases: Vec<RawDatabase>,
     unfiled: Option<PathBuf>,
-}
-
-enum RawEntry {
-    Path(PathBuf),
-    Table(RawTable),
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RawTable {
-    path: PathBuf,
-    field: Option<String>,
-    value: Option<OneOrMany>,
+struct RawDatabase {
+    beads_dir: PathBuf,
     project: Option<String>,
+    split: Option<RawSplit>,
 }
 
-struct OneOrMany(Vec<String>);
-
-// Hand-written rather than untagged: an untagged enum reports "did not
-// match any variant" and hides which key was wrong.
-impl<'de> Deserialize<'de> for RawEntry {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        struct Visitor;
-
-        impl<'de> de::Visitor<'de> for Visitor {
-            type Value = RawEntry;
-
-            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str("a path or a table")
-            }
-
-            fn visit_str<E: de::Error>(self, v: &str) -> Result<RawEntry, E> {
-                Ok(RawEntry::Path(PathBuf::from(v)))
-            }
-
-            fn visit_map<A: de::MapAccess<'de>>(self, map: A) -> Result<RawEntry, A::Error> {
-                RawTable::deserialize(MapAccessDeserializer::new(map)).map(RawEntry::Table)
-            }
-        }
-
-        deserializer.deserialize_any(Visitor)
-    }
-}
-
-impl<'de> Deserialize<'de> for OneOrMany {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        struct Visitor;
-
-        impl<'de> de::Visitor<'de> for Visitor {
-            type Value = OneOrMany;
-
-            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str("a string or a list of strings")
-            }
-
-            fn visit_str<E: de::Error>(self, v: &str) -> Result<OneOrMany, E> {
-                Ok(OneOrMany(vec![v.to_owned()]))
-            }
-
-            fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<OneOrMany, A::Error> {
-                let mut items = Vec::new();
-                while let Some(item) = seq.next_element::<String>()? {
-                    items.push(item);
-                }
-                Ok(OneOrMany(items))
-            }
-        }
-
-        deserializer.deserialize_any(Visitor)
-    }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSplit {
+    by: String,
+    #[serde(default)]
+    projects: BTreeMap<String, String>,
 }
 
 #[derive(Debug)]
@@ -155,10 +93,6 @@ pub enum ConfigError {
         entry: PathBuf,
     },
     Relative {
-        path: PathBuf,
-        entry: PathBuf,
-    },
-    NoField {
         path: PathBuf,
         entry: PathBuf,
     },
@@ -189,12 +123,6 @@ impl fmt::Display for ConfigError {
             ConfigError::Invalid { path, key, reason } => {
                 write!(f, "{}: {key}: {reason}", path.display())
             }
-            ConfigError::NoField { path, entry } => write!(
-                f,
-                "{}: {}: no field set: set field on the entry or at the top level",
-                path.display(),
-                entry.display()
-            ),
         }
     }
 }
@@ -206,7 +134,6 @@ impl Error for ConfigError {
             ConfigError::Parse { source, .. } => Some(source),
             ConfigError::NoHome { .. }
             | ConfigError::Relative { .. }
-            | ConfigError::NoField { .. }
             | ConfigError::Invalid { .. } => None,
         }
     }
@@ -252,66 +179,73 @@ impl Config {
             key: key.to_owned(),
             reason: reason.to_owned(),
         };
-        if let Some(field) = &raw.field {
-            check_field(field).map_err(|r| invalid("field", r))?;
-        }
         let unfiled = raw
             .unfiled
             .unwrap_or_else(|| PathBuf::from(DEFAULT_UNFILED));
         check_unfiled(&unfiled).map_err(|r| invalid("unfiled", r))?;
         let vault = raw.vault.map(resolve).transpose()?;
-        let mut repos = Vec::with_capacity(raw.repos.len());
-        for (i, entry) in raw.repos.into_iter().enumerate() {
-            repos.push(match entry {
-                RawEntry::Path(path) => RepoEntry::Path(resolve(path)?),
-                RawEntry::Table(table) => {
-                    let path = resolve(table.path)?;
-                    let field = table.field.or_else(|| raw.field.clone()).ok_or_else(|| {
-                        ConfigError::NoField {
-                            path: file.to_path_buf(),
-                            entry: path.clone(),
-                        }
-                    })?;
-                    let key = |name: &str| format!("repos[{i}].{name}");
-                    check_field(&field).map_err(|r| invalid(&key("field"), r))?;
-                    if let Some(value) = &table.value
-                        && (value.0.is_empty() || value.0.iter().any(String::is_empty))
-                    {
-                        return Err(invalid(
-                            &key("value"),
-                            "must be a non-empty string or list of non-empty strings",
-                        ));
-                    }
-                    if table.project.as_deref() == Some("") {
+        let mut databases: Vec<DatabaseEntry> = Vec::with_capacity(raw.databases.len());
+        for (i, entry) in raw.databases.into_iter().enumerate() {
+            let key = |name: &str| format!("databases[{i}].{name}");
+            let beads_dir = resolve(entry.beads_dir)?;
+            let filing = match (entry.project, entry.split) {
+                (Some(_), Some(_)) => {
+                    return Err(invalid(
+                        &format!("databases[{i}]"),
+                        "must not set both project and split",
+                    ));
+                }
+                (project, None) => {
+                    if project.as_deref() == Some("") {
                         return Err(invalid(&key("project"), "must not be empty"));
                     }
-                    RepoEntry::Table(TableEntry {
-                        path,
-                        field,
-                        value: table.value.map(|v| v.0),
-                        project: table.project,
+                    Filing::Single { project }
+                }
+                (None, Some(split)) => {
+                    let by = split
+                        .by
+                        .parse::<FieldPath>()
+                        .map_err(|e| invalid(&key("split.by"), &e.to_string()))?;
+                    if split
+                        .projects
+                        .iter()
+                        .any(|(value, project)| value.is_empty() || project.is_empty())
+                    {
+                        return Err(invalid(
+                            &key("split.projects"),
+                            "must map non-empty values to non-empty project names",
+                        ));
+                    }
+                    Filing::Split(Split {
+                        by,
+                        projects: split.projects,
                     })
                 }
-            });
+            };
+            if let Some(first) = databases
+                .iter()
+                .position(|d| same_database(&d.beads_dir, &beads_dir))
+            {
+                return Err(invalid(
+                    &key("beads_dir"),
+                    &format!("is the same database as databases[{first}]"),
+                ));
+            }
+            databases.push(DatabaseEntry { beads_dir, filing });
         }
         Ok(Config {
             vault,
-            repos,
-            field: raw.field,
+            databases,
             unfiled,
         })
     }
-
-    pub fn paths(&self) -> Vec<PathBuf> {
-        self.repos.iter().map(|r| r.path().to_path_buf()).collect()
-    }
 }
 
-fn check_field(field: &str) -> Result<(), &'static str> {
-    if field.split('.').any(str::is_empty) {
-        return Err("must be a dotted path with no empty segments");
+fn same_database(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
     }
-    Ok(())
 }
 
 // Relative to the vault root, so it must not escape or depend on the cwd.
@@ -388,24 +322,22 @@ mod tests {
     }
 
     #[test]
-    fn reads_vault_and_repos() {
+    fn reads_vault_and_databases() {
         let text = r#"
 vault = "~/org"
-repos = [
-  "~/Workspaces/ganymede",
-  "~/Workspaces/b",
-]
+
+[[databases]]
+beads_dir = "~/Workspaces/ganymede/.beads"
 "#;
         let (_, config) = load_text(text, home());
         assert_eq!(
             config.unwrap(),
             Config {
                 vault: Some("/h/org".into()),
-                repos: vec![
-                    RepoEntry::Path("/h/Workspaces/ganymede".into()),
-                    RepoEntry::Path("/h/Workspaces/b".into()),
-                ],
-                field: None,
+                databases: vec![DatabaseEntry {
+                    beads_dir: "/h/Workspaces/ganymede/.beads".into(),
+                    filing: Filing::Single { project: None },
+                }],
                 unfiled: "Inbox".into(),
             }
         );
@@ -418,109 +350,11 @@ repos = [
     }
 
     #[test]
-    fn reads_mixed_entries() {
-        let text = r#"
-field = "metadata.repo"
-repos = [
-  "~/a",
-  { path = "~/b", value = "github.com/o/b", project = "B" },
-  { path = "/c", field = "x.y", value = ["o/c", "o/c2"] },
-]
-"#;
-        let (_, config) = load_text(text, home());
-        assert_eq!(
-            config.unwrap().repos,
-            vec![
-                RepoEntry::Path("/h/a".into()),
-                RepoEntry::Table(TableEntry {
-                    path: "/h/b".into(),
-                    field: "metadata.repo".into(),
-                    value: Some(vec!["github.com/o/b".into()]),
-                    project: Some("B".into()),
-                }),
-                RepoEntry::Table(TableEntry {
-                    path: "/c".into(),
-                    field: "x.y".into(),
-                    value: Some(vec!["o/c".into(), "o/c2".into()]),
-                    project: None,
-                }),
-            ]
-        );
-    }
-
-    #[test]
-    fn table_value_and_project_optional() {
-        let text = "field = \"f\"\nrepos = [{ path = \"/b\" }]";
-        let (_, config) = load_text(text, home());
-        assert_eq!(
-            config.unwrap().repos,
-            vec![RepoEntry::Table(TableEntry {
-                path: "/b".into(),
-                field: "f".into(),
-                value: None,
-                project: None,
-            })]
-        );
-    }
-
-    #[test]
-    fn table_without_field_is_an_error() {
-        let (_, config) = load_text(r#"repos = [{ path = "/b" }]"#, home());
-        assert!(
-            matches!(&config, Err(ConfigError::NoField { entry, .. }) if entry == Path::new("/b"))
-        );
-        assert!(config.unwrap_err().to_string().contains("no field set"));
-    }
-
-    #[test]
-    fn unknown_key_in_table_names_it() {
-        let text = "field = \"f\"\nrepos = [{ path = \"/b\", projet = \"B\" }]";
-        let (_, config) = load_text(text, home());
-        let err = config.unwrap_err();
-        assert!(matches!(err, ConfigError::Parse { .. }));
-        let text = err.to_string();
-        assert!(text.contains("projet"), "{text}");
-        assert!(!text.contains("did not match any variant"), "{text}");
-    }
-
-    #[test]
     fn unknown_top_level_key_names_it() {
-        let (_, config) = load_text(r#"repo = ["/x"]"#, home());
-        assert!(config.unwrap_err().to_string().contains("repo"));
-    }
-
-    #[test]
-    fn wrong_entry_type_is_an_error() {
-        for text in ["repos = [1]", r#"repos = [["/x"]]"#] {
-            let (_, config) = load_text(text, home());
-            let err = config.unwrap_err();
-            assert!(matches!(err, ConfigError::Parse { .. }));
-            assert!(err.to_string().contains("path or a table"), "{err}");
-        }
-    }
-
-    #[test]
-    fn wrong_value_type_is_an_error() {
-        let text = "field = \"f\"\nrepos = [{ path = \"/b\", value = 1 }]";
-        let (_, config) = load_text(text, home());
-        assert!(matches!(config, Err(ConfigError::Parse { .. })));
-    }
-
-    #[test]
-    fn table_path_is_expanded_and_absolute() {
-        let text = "field = \"f\"\nrepos = [{ path = \"rel\" }]";
-        let (_, config) = load_text(text, home());
-        assert!(matches!(config, Err(ConfigError::Relative { .. })));
-        let text = "field = \"f\"\nrepos = [{ path = \"~/b\" }]";
-        let (_, config) = load_text(text, None);
-        assert!(matches!(config, Err(ConfigError::NoHome { .. })));
-    }
-
-    #[test]
-    fn missing_checkout_loads() {
-        let text = "field = \"f\"\nrepos = [{ path = \"/does/not/exist\", value = \"v\" }]";
-        let (_, config) = load_text(text, home());
-        assert!(config.is_ok());
+        let (_, config) = load_text(r#"database = ["/x"]"#, home());
+        let err = config.unwrap_err();
+        assert!(matches!(err, ConfigError::Parse { .. }), "{err:?}");
+        assert!(err.to_string().contains("database"), "{err}");
     }
 
     #[test]
@@ -535,29 +369,6 @@ repos = [
             Err(ConfigError::Invalid { key, .. }) => key,
             other => panic!("expected Invalid for {text:?}, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn bad_field_is_an_error() {
-        for bad in ["", "a..b", ".a", "a."] {
-            assert_eq!(invalid_key(&format!("field = \"{bad}\"")), "field");
-            let text = format!("repos = [{{ path = \"/b\", field = \"{bad}\" }}]");
-            assert_eq!(invalid_key(&text), "repos[0].field");
-        }
-    }
-
-    #[test]
-    fn empty_value_is_an_error() {
-        for bad in [r#""""#, "[]", r#"["a", ""]"#] {
-            let text = format!("field = \"f\"\nrepos = [{{ path = \"/b\", value = {bad} }}]");
-            assert_eq!(invalid_key(&text), "repos[0].value");
-        }
-    }
-
-    #[test]
-    fn empty_project_is_an_error() {
-        let text = "field = \"f\"\nrepos = [{ path = \"/b\", project = \"\" }]";
-        assert_eq!(invalid_key(text), "repos[0].project");
     }
 
     #[test]
@@ -577,31 +388,41 @@ repos = [
 
     #[test]
     fn invalid_display_names_file_and_key() {
-        let (file, config) = load_text(r#"field = "a..b""#, home());
+        let (file, config) = load_text(r#"unfiled = "/abs""#, home());
         let text = config.unwrap_err().to_string();
         assert!(
-            text.starts_with(&format!("{}: field: ", file.display())),
+            text.starts_with(&format!("{}: unfiled: ", file.display())),
             "{text}"
         );
     }
 
     #[test]
     fn malformed_file_is_an_error() {
-        let (file, config) = load_text("repos = [", home());
+        let (file, config) = load_text("databases = [", home());
         let err = config.unwrap_err();
         assert!(matches!(&err, ConfigError::Parse { path, .. } if *path == file));
         assert!(err.to_string().starts_with(&file.display().to_string()));
     }
 
     #[test]
-    fn unknown_key_is_an_error() {
-        let (_, config) = load_text(r#"repo = ["/x"]"#, home());
-        assert!(matches!(config, Err(ConfigError::Parse { .. })));
+    fn old_repos_key_is_unknown() {
+        let (_, config) = load_text("repos = []", home());
+        let err = config.unwrap_err();
+        assert!(matches!(err, ConfigError::Parse { .. }), "{err:?}");
+        assert!(err.to_string().contains("repos"), "{err}");
+    }
+
+    #[test]
+    fn old_field_key_is_unknown() {
+        let (_, config) = load_text(r#"field = "metadata.repo""#, home());
+        let err = config.unwrap_err();
+        assert!(matches!(err, ConfigError::Parse { .. }), "{err:?}");
+        assert!(err.to_string().contains("field"), "{err}");
     }
 
     #[test]
     fn wrong_type_is_an_error() {
-        let (_, config) = load_text(r#"repos = "/x""#, home());
+        let (_, config) = load_text(r#"databases = "/x""#, home());
         assert!(matches!(config, Err(ConfigError::Parse { .. })));
     }
 
@@ -623,16 +444,9 @@ repos = [
     }
 
     #[test]
-    fn relative_entry_is_an_error() {
-        let (_, config) = load_text(r#"repos = ["Workspaces/ganymede"]"#, home());
-        assert!(
-            matches!(config, Err(ConfigError::Relative { entry, .. }) if entry == Path::new("Workspaces/ganymede"))
-        );
-    }
-
-    #[test]
-    fn vault_error_reported_before_repos() {
-        let (_, config) = load_text("vault = \"rel\"\nrepos = [\"also-rel\"]", home());
+    fn vault_error_reported_before_databases() {
+        let text = "vault = \"rel\"\n[[databases]]\nbeads_dir = \"also-rel\"";
+        let (_, config) = load_text(text, home());
         assert!(
             matches!(config, Err(ConfigError::Relative { entry, .. }) if entry == Path::new("rel"))
         );
@@ -649,16 +463,144 @@ repos = [
 
     #[test]
     fn absolute_entries_need_no_home() {
-        let (_, config) = load_text("vault = \"/v\"\nrepos = [\"/r\"]", None);
+        let text = "vault = \"/v\"\n[[databases]]\nbeads_dir = \"/r/.beads\"";
+        let (_, config) = load_text(text, None);
         assert_eq!(
             config.unwrap(),
             Config {
                 vault: Some("/v".into()),
-                repos: vec![RepoEntry::Path("/r".into())],
-                field: None,
+                databases: vec![DatabaseEntry {
+                    beads_dir: "/r/.beads".into(),
+                    filing: Filing::Single { project: None },
+                }],
                 unfiled: "Inbox".into(),
             }
         );
+    }
+
+    #[test]
+    fn databases_parse_single_and_split() {
+        let text = r#"
+[[databases]]
+beads_dir = "~/work/api/.beads"
+
+[[databases]]
+beads_dir = "/srv/b/.beads"
+project = "B"
+
+[[databases]]
+beads_dir = "/srv/shared/.beads"
+split.by = "metadata.repo"
+split.projects = { "github.com/o/api" = "API" }
+"#;
+        let (_, config) = load_text(text, home());
+        assert_eq!(
+            config.unwrap().databases,
+            vec![
+                DatabaseEntry {
+                    beads_dir: "/h/work/api/.beads".into(),
+                    filing: Filing::Single { project: None },
+                },
+                DatabaseEntry {
+                    beads_dir: "/srv/b/.beads".into(),
+                    filing: Filing::Single {
+                        project: Some("B".into())
+                    },
+                },
+                DatabaseEntry {
+                    beads_dir: "/srv/shared/.beads".into(),
+                    filing: Filing::Split(Split {
+                        by: "metadata.repo".parse().unwrap(),
+                        projects: BTreeMap::from([("github.com/o/api".into(), "API".into())]),
+                    }),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn project_and_split_together_is_invalid() {
+        let text = "[[databases]]\nbeads_dir = \"/a\"\nproject = \"P\"\nsplit.by = \"x\"";
+        let (_, config) = load_text(text, home());
+        let err = config.unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::Invalid { key, .. } if key == "databases[0]"),
+            "{err}"
+        );
+        let text = err.to_string();
+        assert!(text.contains("project") && text.contains("split"), "{text}");
+    }
+
+    #[test]
+    fn split_requires_by() {
+        let text = "[[databases]]\nbeads_dir = \"/a\"\n[databases.split]\nprojects = {}";
+        let (_, config) = load_text(text, home());
+        let err = config.unwrap_err();
+        assert!(matches!(err, ConfigError::Parse { .. }));
+        assert!(err.to_string().contains("by"), "{err}");
+    }
+
+    #[test]
+    fn unknown_key_in_split_is_named() {
+        let text = "[[databases]]\nbeads_dir = \"/a\"\nsplit.bye = \"x\"";
+        let (_, config) = load_text(text, home());
+        let err = config.unwrap_err();
+        assert!(matches!(err, ConfigError::Parse { .. }));
+        assert!(err.to_string().contains("bye"), "{err}");
+    }
+
+    #[test]
+    fn bad_database_values_are_invalid() {
+        let head = "[[databases]]\nbeads_dir = \"/a\"\n";
+        let cases = [
+            ("project = \"\"", "databases[0].project"),
+            ("split.by = \"a..b\"", "databases[0].split.by"),
+            (
+                "split.by = \"x\"\nsplit.projects = { \"\" = \"P\" }",
+                "databases[0].split.projects",
+            ),
+            (
+                "split.by = \"x\"\nsplit.projects = { v = \"\" }",
+                "databases[0].split.projects",
+            ),
+        ];
+        for (body, key) in cases {
+            assert_eq!(invalid_key(&format!("{head}{body}")), key, "{body}");
+        }
+    }
+
+    #[test]
+    fn same_database_twice_is_invalid() {
+        let text =
+            "[[databases]]\nbeads_dir = \"~/x/.beads\"\n[[databases]]\nbeads_dir = \"/h/x/.beads\"";
+        assert_eq!(invalid_key(text), "databases[1].beads_dir");
+    }
+
+    #[test]
+    fn same_database_by_symlink_is_invalid() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        fs::create_dir(&real).unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let text = format!(
+            "[[databases]]\nbeads_dir = \"{}\"\n[[databases]]\nbeads_dir = \"{}/\"",
+            real.display(),
+            link.display()
+        );
+        assert_eq!(invalid_key(&text), "databases[1].beads_dir");
+    }
+
+    #[test]
+    fn relative_beads_dir_is_rejected() {
+        let (_, config) = load_text("[[databases]]\nbeads_dir = \"rel/.beads\"", home());
+        assert!(matches!(config, Err(ConfigError::Relative { .. })));
+    }
+
+    #[test]
+    fn missing_beads_dir_still_loads() {
+        let (_, config) = load_text("[[databases]]\nbeads_dir = \"/does/not/exist\"", home());
+        assert!(config.is_ok());
     }
 
     fn cfg() -> Config {

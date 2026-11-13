@@ -1,10 +1,10 @@
-//! The vault project or area a repo's notes are filed under.
+//! The vault project or area a database's notes are filed under.
 
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::repo::{PROJECT_KEY, Repo, Settings};
+use crate::repo::{PROJECT_KEY, Settings};
 
 /// Where a project or area's folder may live, in lookup order.
 pub const LOCATIONS: [&str; 4] = ["Projects", "Areas", "Archives/Projects", "Archives/Areas"];
@@ -23,19 +23,31 @@ impl Project {
     }
 }
 
-/// A repo with no project to file under. It is skipped, never given one.
+/// A database with no project to file under. It is skipped, never given
+/// one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Unmapped {
     pub name: String,
-    pub overridden: bool,
+    pub source: Source,
+}
+
+/// Where a project name came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Source {
+    /// The name of the directory that holds the database.
+    Default,
+    /// The database's bd setting.
+    Setting,
+    /// The database's `project` in the config file.
+    Config,
 }
 
 impl fmt::Display for Unmapped {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let source = if self.overridden {
-            format!(" (set by {PROJECT_KEY})")
-        } else {
-            String::new()
+        let source = match self.source {
+            Source::Default => String::new(),
+            Source::Setting => format!(" (set by {PROJECT_KEY})"),
+            Source::Config => " (set by project in config)".to_string(),
         };
         write!(
             f,
@@ -45,16 +57,16 @@ impl fmt::Display for Unmapped {
     }
 }
 
-/// A set override is final: falling back to the repo name would hide a
-/// typo in it.
-pub fn map(vault: &Path, repo: &Repo, settings: &Settings) -> Result<Project, Unmapped> {
-    let (name, overridden) = match &settings.project {
-        Some(name) => (name.as_str(), true),
-        None => (repo.name.as_str(), false),
+/// Files under `name` unless `settings` overrides it. A set override is
+/// final: falling back to `name` would hide a typo in it.
+pub fn map(vault: &Path, name: &str, settings: &Settings) -> Result<Project, Unmapped> {
+    let (name, source) = match &settings.project {
+        Some(project) => (project.as_str(), Source::Setting),
+        None => (name, Source::Default),
     };
     find(vault, name).ok_or_else(|| Unmapped {
         name: name.to_string(),
-        overridden,
+        source,
     })
 }
 
@@ -100,7 +112,7 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
 
-    use crate::repo::{Repo, Settings};
+    use crate::repo::Settings;
 
     fn home(vault: &Path, dir: &str, name: &str) -> PathBuf {
         let rel = Path::new(dir).join(name).join(format!("{name}.md"));
@@ -115,13 +127,6 @@ mod tests {
             name: name.into(),
             home,
         })
-    }
-
-    fn repo(name: &str) -> Repo {
-        Repo {
-            root: PathBuf::from("/r").join(name),
-            name: name.into(),
-        }
     }
 
     fn settings(project: Option<&str>) -> Settings {
@@ -218,11 +223,11 @@ mod tests {
     }
 
     #[test]
-    fn map_uses_the_repo_name() {
+    fn map_uses_the_name() {
         let vault = tempfile::tempdir().unwrap();
         let rel = home(vault.path(), "Projects", "ganymede");
         assert_eq!(
-            map(vault.path(), &repo("ganymede"), &settings(None)).ok(),
+            map(vault.path(), "ganymede", &settings(None)).ok(),
             project("ganymede", rel)
         );
     }
@@ -233,12 +238,7 @@ mod tests {
         home(vault.path(), "Projects", "infra");
         let rel = home(vault.path(), "Projects", "Example Project");
         assert_eq!(
-            map(
-                vault.path(),
-                &repo("infra"),
-                &settings(Some("Example Project"))
-            )
-            .ok(),
+            map(vault.path(), "infra", &settings(Some("Example Project"))).ok(),
             project("Example Project", rel)
         );
     }
@@ -248,12 +248,7 @@ mod tests {
         let vault = tempfile::tempdir().unwrap();
         let rel = home(vault.path(), "Areas", "dotfiles");
         assert_eq!(
-            map(
-                vault.path(),
-                &repo(".dotfiles"),
-                &settings(Some("dotfiles"))
-            )
-            .ok(),
+            map(vault.path(), ".dotfiles", &settings(Some("dotfiles"))).ok(),
             project("dotfiles", rel)
         );
     }
@@ -261,12 +256,12 @@ mod tests {
     #[test]
     fn missing_project_is_unmapped() {
         let vault = tempfile::tempdir().unwrap();
-        let err = map(vault.path(), &repo("stctl"), &settings(None)).unwrap_err();
+        let err = map(vault.path(), "stctl", &settings(None)).unwrap_err();
         assert_eq!(
             err,
             Unmapped {
                 name: "stctl".into(),
-                overridden: false,
+                source: Source::Default,
             }
         );
         let text = err.to_string();
@@ -282,9 +277,9 @@ mod tests {
     fn missing_override_is_unmapped() {
         let vault = tempfile::tempdir().unwrap();
         home(vault.path(), "Projects", "infra");
-        let err = map(vault.path(), &repo("infra"), &settings(Some("Gone"))).unwrap_err();
+        let err = map(vault.path(), "infra", &settings(Some("Gone"))).unwrap_err();
         assert_eq!(err.name, "Gone");
-        assert!(err.overridden);
+        assert_eq!(err.source, Source::Setting);
         assert!(err.to_string().contains("custom.obsidian.project"), "{err}");
     }
 
@@ -293,8 +288,8 @@ mod tests {
         let vault = tempfile::tempdir().unwrap();
         home(vault.path(), "Areas", "other");
         let before = files(vault.path());
-        assert!(map(vault.path(), &repo("stctl"), &settings(None)).is_err());
-        assert!(map(vault.path(), &repo("stctl"), &settings(Some("New"))).is_err());
+        assert!(map(vault.path(), "stctl", &settings(None)).is_err());
+        assert!(map(vault.path(), "stctl", &settings(Some("New"))).is_err());
         assert_eq!(files(vault.path()), before);
     }
 }

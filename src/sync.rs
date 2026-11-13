@@ -1,4 +1,4 @@
-//! Syncing one repo's beads into the vault.
+//! Syncing one database's beads into the vault.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -9,43 +9,44 @@ use std::path::{Path, PathBuf};
 use jiff::tz::TimeZone;
 
 use crate::bd::Bd;
-use crate::claim::{self, Unclaimed};
+use crate::claim::{self, Unfiled};
+use crate::config::{Filing as Configured, Split};
+use crate::database::Database;
 use crate::errlog::Stage;
 use crate::export::{self, ExportError};
 use crate::field_path::{FieldPath, FieldValue};
 use crate::filename;
 use crate::graph::Graph;
-use crate::group::FieldClaims;
 use crate::lock::Lock;
-use crate::project::{self, Project, Unmapped};
+use crate::project::{self, Project, Source, Unmapped};
 use crate::removed;
 use crate::render::{self, frontmatter::Context, link::Links, unfiled};
-use crate::repo::{self, Repo, SettingsError};
+use crate::repo::{self, SettingsError};
 use crate::standing::Condition;
 use crate::vault::{self, Generated, Index, ScanError, owner};
 use crate::write;
 
-/// The issue prefixes of the configured repos, which decide which repo
-/// a bead id belongs to.
+/// The issue prefixes of the configured databases, which decide which
+/// database a bead id belongs to.
 #[derive(Debug, Clone, Default)]
 pub struct Scope {
     pub prefixes: Vec<String>,
-    /// Configured repos whose prefix could not be read.
+    /// Configured databases whose prefix could not be read.
     pub unreadable: Vec<PathBuf>,
+    /// Prefixes held by two or more configured databases.
+    pub shared: Vec<String>,
 }
 
 pub struct Request<'a> {
     pub bd: &'a Bd,
     pub vault: &'a Path,
-    pub repo: &'a Repo,
+    pub database: &'a Database,
+    /// False for a checkout's own database that the config does not list.
+    pub configured: bool,
     pub scope: &'a Scope,
     pub tz: &'a TimeZone,
-    /// `None` files every bead under the repo's own project.
-    pub claims: Option<&'a FieldClaims>,
-    /// Some table entry could not be resolved, so a bead missing from
-    /// this export may belong to that entry.
-    pub degraded: bool,
-    /// Vault-relative folder for a table group's index of unclaimed beads.
+    /// Vault-relative folder for a split database's index of unfiled
+    /// beads.
     pub unfiled: &'a Path,
 }
 
@@ -58,16 +59,15 @@ pub struct Report {
     pub unchanged: usize,
     pub warnings: Vec<Warning>,
     pub conditions: Vec<Condition>,
-    /// Beads no table entry files, in export order.
-    pub unclaimed: Vec<Unclaimed>,
-    pub degraded: bool,
+    /// Beads a split database could not file, in export order.
+    pub unfiled: Vec<Unfiled>,
 }
 
 #[derive(Debug)]
 pub enum Warning {
     Unmapped(Unmapped),
-    /// The repo is not in the configured list, so a longer prefix may own
-    /// some of the ids it claims.
+    /// The database is not configured, so a longer prefix may own some of
+    /// the ids it claims.
     UncheckedPrefix {
         prefix: String,
     },
@@ -85,12 +85,21 @@ pub enum Warning {
         id: String,
         path: PathBuf,
     },
-    /// Removal was skipped: without every configured prefix, this repo
-    /// could claim another repo's notes.
+    /// Removal was skipped: without every configured prefix, this
+    /// database could claim another database's notes.
     ScopeIncomplete {
-        repos: Vec<PathBuf>,
+        databases: Vec<PathBuf>,
     },
-    Degraded,
+    /// Removal was skipped: another configured database uses this prefix,
+    /// so a bead absent from this export may be in that one.
+    SharedPrefix {
+        prefix: String,
+    },
+    /// Removal was skipped: this unconfigured database uses a configured
+    /// database's prefix, so its export may lack that database's beads.
+    ConfiguredPrefix {
+        prefix: String,
+    },
 }
 
 impl fmt::Display for Warning {
@@ -106,7 +115,7 @@ impl fmt::Display for Warning {
             Warning::Unmapped(u) => u.fmt(f),
             Warning::UncheckedPrefix { prefix } => write!(
                 f,
-                "prefix \"{prefix}\" is not in the configured repo list, so it is unchecked"
+                "prefix \"{prefix}\" is not among the configured databases, so it is unchecked"
             ),
             Warning::Duplicate { id, paths } => {
                 write!(
@@ -134,14 +143,19 @@ impl fmt::Display for Warning {
                 "{id}: {} is not valid UTF-8, so it was not marked removed; fix its encoding to let callisto mark it",
                 path.display()
             ),
-            Warning::ScopeIncomplete { repos } => write!(
+            Warning::ScopeIncomplete { databases } => write!(
                 f,
                 "cannot read the prefix of {}; removed beads were not marked",
-                list(repos)
+                list(databases)
             ),
-            Warning::Degraded => {
-                f.write_str("a table entry is unresolvable; removed beads were not marked")
-            }
+            Warning::SharedPrefix { prefix } => write!(
+                f,
+                "another configured database uses prefix \"{prefix}\"; removed beads were not marked"
+            ),
+            Warning::ConfiguredPrefix { prefix } => write!(
+                f,
+                "this database is not configured but a configured one uses prefix \"{prefix}\"; removed beads were not marked"
+            ),
         }
     }
 }
@@ -151,8 +165,8 @@ pub enum Error {
     Settings(SettingsError),
     NoVault(PathBuf),
     Export(ExportError),
-    /// A bead this repo does not own: it lacks the prefix, or a longer
-    /// configured prefix claims it. bd may have read another repo's
+    /// A bead this database does not own: it lacks the prefix, or a
+    /// longer configured prefix claims it. bd may have read another
     /// database, and that export would mark every note removed.
     Foreign {
         id: String,
@@ -203,21 +217,33 @@ impl std::error::Error for Error {
 
 /// Holding `_lock` is the caller's proof that no other run reads or
 /// writes between this run's export and its last write.
-pub fn sync_repo(_lock: &Lock, req: &Request) -> Result<Report, Error> {
+pub fn sync_database(_lock: &Lock, req: &Request) -> Result<Report, Error> {
     let mut report = Report::default();
-    let settings = repo::settings(req.bd, req.repo).map_err(Error::Settings)?;
+    let database = req.database;
+    let settings = repo::settings(req.bd, &database.dir).map_err(Error::Settings)?;
     if !req.vault.is_dir() {
         return Err(Error::NoVault(req.vault.to_path_buf()));
     }
-    let filer = match req.claims {
-        Some(claims) => Filer::Field(claims),
-        None => match project::map(req.vault, req.repo, &settings) {
-            Ok(project) => Filer::Repo(project),
-            Err(unmapped) => {
-                report.warnings.push(Warning::Unmapped(unmapped));
-                return Ok(report);
+    let filer = match &database.filing {
+        Configured::Split(split) => Filer::Split(split),
+        Configured::Single { project } => {
+            // A configured project is final, like the bd setting: falling
+            // back would hide a typo in it.
+            let mapped = match project {
+                Some(name) => project::find(req.vault, name).ok_or_else(|| Unmapped {
+                    name: name.clone(),
+                    source: Source::Config,
+                }),
+                None => project::map(req.vault, &database.name, &settings),
+            };
+            match mapped {
+                Ok(project) => Filer::Single(project),
+                Err(unmapped) => {
+                    report.warnings.push(Warning::Unmapped(unmapped));
+                    return Ok(report);
+                }
             }
-        },
+        }
     };
     let prefix = settings.prefix;
     if !req.scope.prefixes.contains(&prefix) {
@@ -225,9 +251,11 @@ pub fn sync_repo(_lock: &Lock, req: &Request) -> Result<Report, Error> {
             prefix: prefix.clone(),
         });
     }
-    let field = req.claims.map(|claims| &claims.field);
-    let mut export =
-        export::export_with_field(req.bd, &req.repo.root, field).map_err(Error::Export)?;
+    let field = match &filer {
+        Filer::Split(split) => Some(&split.by),
+        Filer::Single(_) => None,
+    };
+    let mut export = export::export(req.bd, &database.dir, field).map_err(Error::Export)?;
     let mut prefixes: Vec<&str> = req.scope.prefixes.iter().map(String::as_str).collect();
     prefixes.push(&prefix);
     let foreign = export
@@ -244,10 +272,8 @@ pub fn sync_repo(_lock: &Lock, req: &Request) -> Result<Report, Error> {
     let fields = std::mem::take(&mut export.fields);
     let graph = Graph::new(export);
     let filing = match filer {
-        Filer::Repo(project) => Filing::Repo(project),
-        Filer::Field(claims) => {
-            Filing::Claims(claim_beads(req, claims, &graph, &fields, &mut report))
-        }
+        Filer::Single(project) => Filing::Single(project),
+        Filer::Split(split) => Filing::Split(file_split(req, split, &graph, &fields, &mut report)),
     };
     let index = Index::scan(req.vault).map_err(Error::Scan)?;
     // A folder no run writes to again would keep its leftover, and
@@ -303,19 +329,21 @@ pub fn sync_repo(_lock: &Lock, req: &Request) -> Result<Report, Error> {
             }),
         }
     }
-    if let Some(claims) = req.claims
-        && !req.degraded
-    {
-        write_index(req, &prefix, &claims.field, &mut report)?;
-    }
-    if req.claims.is_some() && req.degraded {
-        report.warnings.push(Warning::Degraded);
-        return Ok(report);
+    if let Some(field) = field {
+        write_index(req, &prefix, field, &mut report)?;
     }
     if !req.scope.unreadable.is_empty() {
         report.warnings.push(Warning::ScopeIncomplete {
-            repos: req.scope.unreadable.clone(),
+            databases: req.scope.unreadable.clone(),
         });
+        return Ok(report);
+    }
+    if req.scope.shared.contains(&prefix) {
+        report.warnings.push(Warning::SharedPrefix { prefix });
+        return Ok(report);
+    }
+    if !req.configured && req.scope.prefixes.contains(&prefix) {
+        report.warnings.push(Warning::ConfiguredPrefix { prefix });
         return Ok(report);
     }
     mark_removed(
@@ -329,8 +357,6 @@ pub fn sync_repo(_lock: &Lock, req: &Request) -> Result<Report, Error> {
     Ok(report)
 }
 
-/// A degraded run must not call this: its unclaimed list may hold beads
-/// an unresolvable entry would claim.
 fn write_index(
     req: &Request,
     prefix: &str,
@@ -345,7 +371,7 @@ fn write_index(
     }
     let rel = req.unfiled.join(unfiled::file_name(prefix));
     let path = req.vault.join(&rel);
-    let text = unfiled::index(prefix, field, &report.unclaimed);
+    let text = unfiled::index(prefix, field, &report.unfiled);
     let io_err = |source| {
         Error::Note(write::Error::Io {
             path: path.clone(),
@@ -376,38 +402,37 @@ fn write_index(
 
 /// Who decides where this run files notes, known before the export.
 enum Filer<'a> {
-    Repo(Project),
-    Field(&'a FieldClaims),
+    Single(Project),
+    Split(&'a Split),
 }
 
 enum Filing {
-    Repo(Project),
-    /// Only claimed beads appear; the rest get no note.
-    Claims(HashMap<String, Project>),
+    Single(Project),
+    /// Only filed beads appear; the rest get no note.
+    Split(HashMap<String, Project>),
 }
 
 impl Filing {
     fn project(&self, id: &str) -> Option<&Project> {
         match self {
-            Filing::Repo(project) => Some(project),
-            Filing::Claims(filed) => filed.get(id),
+            Filing::Single(project) => Some(project),
+            Filing::Split(filed) => filed.get(id),
         }
     }
 }
 
-fn claim_beads(
+fn file_split(
     req: &Request,
-    claims: &FieldClaims,
+    split: &Split,
     graph: &Graph,
     fields: &HashMap<String, FieldValue>,
     report: &mut Report,
 ) -> HashMap<String, Project> {
-    let partition = claim::partition(req.vault, graph.notes(), fields, &claims.claims);
+    let partition = claim::partition_split(req.vault, graph.notes(), fields, &split.projects);
     report
         .conditions
-        .extend(claim::conditions(&partition.unclaimed));
-    report.unclaimed = partition.unclaimed;
-    report.degraded = req.degraded;
+        .extend(claim::conditions(&partition.unfiled));
+    report.unfiled = partition.unfiled;
     partition.filed
 }
 
@@ -430,7 +455,7 @@ fn hidden(vault: &Path, filing: &Filing, graph: &Graph, index: &Index) -> HashSe
         .collect()
 }
 
-/// Marks the repo's notes whose beads no longer get a note. A bead that
+/// Marks the database's notes whose beads no longer get a note. A bead that
 /// turned into scaffolding counts as removed: nothing renders it now.
 fn mark_removed(
     vault: &Path,

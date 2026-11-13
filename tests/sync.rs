@@ -10,11 +10,12 @@ use jiff::tz::{Offset, TimeZone};
 use tempfile::TempDir;
 
 use callisto::bd::Bd;
-use callisto::claim::{Reason, Unclaimed};
+use callisto::claim::{Reason, Unfiled};
+use callisto::config::{Filing, Split};
+use callisto::database::Database;
 use callisto::errlog::Stage;
-use callisto::group::{Claim, FieldClaims};
 use callisto::lock;
-use callisto::repo::{self, Repo};
+use callisto::project::Source;
 use callisto::standing::Condition;
 use callisto::sync::{self, Report, Request, Scope, Warning};
 use callisto::vault::Index;
@@ -22,11 +23,12 @@ use callisto::vault::Index;
 mod common;
 
 const FAKE_BD: &str = r#"#!/bin/sh
+d="$BEADS_DIR"
 case "$1" in
-export) exec cat .beads/export.jsonl ;;
+export) exec cat "$d/export.jsonl" ;;
 config) case "$4" in
-  issue_prefix) printf '{"key":"issue_prefix","value":"%s"}\n' "$(cat .beads/prefix)" ;;
-  custom.obsidian.project) printf '{"key":"%s","value":"%s"}\n' "$4" "$(cat .beads/project 2>/dev/null)" ;;
+  issue_prefix) printf '{"key":"issue_prefix","value":"%s"}\n' "$(cat "$d/prefix")" ;;
+  custom.obsidian.project) printf '{"key":"%s","value":"%s"}\n' "$4" "$(cat "$d/project" 2>/dev/null)" ;;
   *) printf '{"key":"%s","value":""}\n' "$4" ;;
   esac ;;
 *) exit 9 ;;
@@ -36,7 +38,7 @@ esac
 struct Fixture {
     tmp: TempDir,
     vault: PathBuf,
-    repo: Repo,
+    database: Database,
     bd: Bd,
     prefix: String,
 }
@@ -47,11 +49,11 @@ fn fixture(prefix: &str, name: &str) -> Fixture {
     let tmp = tempfile::tempdir().unwrap();
     let vault = tmp.path().join("vault");
     put(&vault, &format!("Projects/{name}/{name}.md"), "# home\n");
-    let checkout = checkout(tmp.path(), prefix, name);
+    let database = database(tmp.path(), prefix, name);
     let bd_path = tmp.path().join("bd");
     common::write_script(&bd_path, FAKE_BD);
     Fixture {
-        repo: repo::locate(&checkout).unwrap(),
+        database,
         bd: Bd::new(bd_path),
         vault,
         tmp,
@@ -59,12 +61,17 @@ fn fixture(prefix: &str, name: &str) -> Fixture {
     }
 }
 
-fn checkout(root: &Path, prefix: &str, name: &str) -> PathBuf {
+/// The database of a checkout named `name`, filed under one project.
+fn database(root: &Path, prefix: &str, name: &str) -> Database {
     let dir = root.join("repos").join(name);
     fs::create_dir_all(dir.join(".git")).unwrap();
     fs::create_dir_all(dir.join(".beads")).unwrap();
     fs::write(dir.join(".beads/prefix"), prefix).unwrap();
-    dir
+    Database {
+        dir: dir.join(".beads").canonicalize().unwrap(),
+        name: name.into(),
+        filing: Filing::Single { project: None },
+    }
 }
 
 fn put(root: &Path, rel: &str, text: &str) {
@@ -84,9 +91,9 @@ fn line(id: &str, title: &str, status: &str) -> String {
     )
 }
 
-fn set_export(repo: &Repo, lines: &[String]) {
+fn set_export(database: &Database, lines: &[String]) {
     let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
-    fs::write(repo.root.join(".beads/export.jsonl"), text).unwrap();
+    fs::write(database.dir.join("export.jsonl"), text).unwrap();
 }
 
 fn paths(rels: &[&str]) -> Vec<PathBuf> {
@@ -97,13 +104,14 @@ type Snapshot = BTreeMap<PathBuf, (Vec<u8>, SystemTime, u32)>;
 
 impl Fixture {
     fn set_export(&self, lines: &[String]) {
-        set_export(&self.repo, lines);
+        set_export(&self.database, lines);
     }
 
     fn scope(&self) -> Scope {
         Scope {
             prefixes: vec![self.prefix.clone()],
             unreadable: vec![],
+            shared: vec![],
         }
     }
 
@@ -112,44 +120,48 @@ impl Fixture {
     }
 
     fn run_with(&self, scope: &Scope) -> Result<Report, sync::Error> {
-        self.run_repo(&self.repo, scope)
+        self.run_database(&self.database, scope)
     }
 
-    /// Another checkout, beside this one, whose beads use `prefix` and
-    /// sync into this vault's project `project`.
-    fn sibling(&self, prefix: &str, name: &str, project: &str) -> Repo {
-        let dir = checkout(self.tmp.path(), prefix, name);
-        fs::write(dir.join(".beads/project"), project).unwrap();
-        repo::locate(&dir).unwrap()
+    /// Another checkout's database, beside this one, whose beads use
+    /// `prefix` and sync into this vault's project `project`.
+    fn sibling(&self, prefix: &str, name: &str, project: &str) -> Database {
+        let database = database(self.tmp.path(), prefix, name);
+        fs::write(database.dir.join("project"), project).unwrap();
+        database
     }
 
-    fn run_repo(&self, repo: &Repo, scope: &Scope) -> Result<Report, sync::Error> {
-        self.run_request(repo, scope, None, false)
+    /// This database, filed as `filing`.
+    fn filed(&self, filing: Filing) -> Database {
+        Database {
+            filing,
+            ..self.database.clone()
+        }
     }
 
-    fn run_claims(&self, claims: &FieldClaims, degraded: bool) -> Result<Report, sync::Error> {
-        self.run_request(&self.repo, &self.scope(), Some(claims), degraded)
+    fn run_split(&self, projects: &[(&str, &str)]) -> Result<Report, sync::Error> {
+        let filing = Filing::Split(Split {
+            by: "metadata.repo".parse().unwrap(),
+            projects: projects
+                .iter()
+                .map(|(value, project)| (value.to_string(), project.to_string()))
+                .collect(),
+        });
+        self.run_database(&self.filed(filing), &self.scope())
     }
 
-    fn run_request(
-        &self,
-        repo: &Repo,
-        scope: &Scope,
-        claims: Option<&FieldClaims>,
-        degraded: bool,
-    ) -> Result<Report, sync::Error> {
+    fn run_database(&self, database: &Database, scope: &Scope) -> Result<Report, sync::Error> {
         let lock = lock::acquire(&self.tmp.path().join("state/sync.lock")).unwrap();
         let tz = TimeZone::fixed(Offset::constant(-4));
-        sync::sync_repo(
+        sync::sync_database(
             &lock,
             &Request {
                 bd: &self.bd,
                 vault: &self.vault,
-                repo,
+                database,
+                configured: true,
                 scope,
                 tz: &tz,
-                claims,
-                degraded,
                 unfiled: Path::new("Inbox"),
             },
         )
@@ -165,7 +177,7 @@ impl Fixture {
         out
     }
 
-    /// `snapshot` without the unfiled folder, which a table run rewrites.
+    /// `snapshot` without the unfiled folder, which a split run rewrites.
     fn snapshot_notes(&self) -> Snapshot {
         let mut out = self.snapshot();
         out.retain(|path, _| !path.starts_with("Inbox"));
@@ -588,6 +600,7 @@ fn removal_spares_other_prefixes() {
     let scope = Scope {
         prefixes: vec!["a".into(), "a-b".into()],
         unreadable: vec![],
+        shared: vec![],
     };
     let report = f.run_with(&scope).unwrap();
     assert!(report.removed.is_empty());
@@ -604,6 +617,7 @@ fn unreadable_scope_skips_removal() {
     let scope = Scope {
         prefixes: vec!["a".into()],
         unreadable: vec![PathBuf::from("/nowhere")],
+        shared: vec![],
     };
     let report = f.run_with(&scope).unwrap();
     assert!(report.removed.is_empty());
@@ -702,6 +716,7 @@ fn longer_prefix_export_is_refused() {
     let scope = Scope {
         prefixes: vec!["a".into(), "a-b".into()],
         unreadable: vec![],
+        shared: vec![],
     };
     let err = f.run_with(&scope).unwrap_err();
     assert_eq!(err.stage(), Stage::Export);
@@ -712,7 +727,7 @@ fn longer_prefix_export_is_refused() {
 const THEIRS: &str = "Projects/a/theirs - a-b-1.md";
 
 /// `a` is configured; `a-b` is not, yet shares `a`'s project folder.
-fn overlap() -> (Fixture, Repo) {
+fn overlap() -> (Fixture, Database) {
     let f = fixture("a", "a");
     let ab = f.sibling("a-b", "a-b", "a");
     f.set_export(&[line("a-1", "first", "open")]);
@@ -724,14 +739,14 @@ fn overlap() -> (Fixture, Repo) {
 fn prefix_overlap_never_flips() {
     let (f, ab) = overlap();
     let scope = f.scope();
-    let first = f.run_repo(&ab, &scope).unwrap();
+    let first = f.run_database(&ab, &scope).unwrap();
     assert_eq!(first.created, paths(&[THEIRS]));
     let rendered = f.read(THEIRS);
     for _ in 0..2 {
         let a = f.run().unwrap();
         assert!(a.removed.is_empty(), "{:?}", a.removed);
         assert_eq!(f.read(THEIRS), rendered);
-        let b = f.run_repo(&ab, &scope).unwrap();
+        let b = f.run_database(&ab, &scope).unwrap();
         assert!(b.removed.is_empty() && b.updated.is_empty(), "{b:?}");
         assert_eq!(f.read(THEIRS), rendered);
     }
@@ -742,13 +757,13 @@ fn prefix_overlap_never_flips() {
 fn prefix_overlap_still_marks_own_removals() {
     let (f, ab) = overlap();
     let scope = f.scope();
-    f.run_repo(&ab, &scope).unwrap();
+    f.run_database(&ab, &scope).unwrap();
     f.run().unwrap();
     f.set_export(&[]);
     let a = f.run().unwrap();
     assert_eq!(a.removed, paths(&[FIRST]));
     set_export(&ab, &[]);
-    let b = f.run_repo(&ab, &scope).unwrap();
+    let b = f.run_database(&ab, &scope).unwrap();
     assert_eq!(b.removed, paths(&[THEIRS]));
 }
 
@@ -778,17 +793,86 @@ fn legacy_note_falls_back_to_owner() {
 fn legacy_overlap_heals_after_one_rewrite() {
     let (f, ab) = overlap();
     let scope = f.scope();
-    f.run_repo(&ab, &scope).unwrap();
+    f.run_database(&ab, &scope).unwrap();
     strip_prefix_line(&f, THEIRS);
     // Without the field only the configured list decides, and it
     // cannot see a-b.
     assert_eq!(f.run().unwrap().removed, paths(&[THEIRS]));
-    let b = f.run_repo(&ab, &scope).unwrap();
+    let b = f.run_database(&ab, &scope).unwrap();
     assert_eq!(b.updated, paths(&[THEIRS]));
     let healed = f.read(THEIRS);
     assert!(!healed.contains("beadRemoved"), "{healed}");
     assert!(f.run().unwrap().removed.is_empty());
     assert_eq!(f.read(THEIRS), healed);
+}
+
+#[test]
+fn shared_prefix_skips_removal() {
+    let f = fixture("a", "a");
+    f.set_export(&[line("a-1", "first", "open")]);
+    f.run().unwrap();
+    f.set_export(&[line("a-2", "second", "open")]);
+    let scope = Scope {
+        shared: vec!["a".into()],
+        ..f.scope()
+    };
+    let report = f.run_with(&scope).unwrap();
+    assert_eq!(report.created, paths(&["Projects/a/second - a-2.md"]));
+    assert!(report.removed.is_empty());
+    assert!(!f.read(FIRST).contains("beadRemoved"));
+    assert!(
+        has_warning(
+            &report,
+            |w| matches!(w, Warning::SharedPrefix { prefix } if prefix == "a")
+        ),
+        "{:?}",
+        report.warnings
+    );
+}
+
+#[test]
+fn config_project_beats_the_bd_setting() {
+    let f = fixture("a", "a");
+    put(&f.vault, "Areas/B/B.md", "# B\n");
+    fs::write(f.database.dir.join("project"), "a").unwrap();
+    f.set_export(&[line("a-1", "first", "open")]);
+    let database = f.filed(Filing::Single {
+        project: Some("B".into()),
+    });
+    let report = f.run_database(&database, &f.scope()).unwrap();
+    assert_eq!(report.created, paths(&["Areas/B/first - a-1.md"]));
+}
+
+#[test]
+fn missing_config_project_does_not_fall_back() {
+    let f = fixture("a", "a");
+    f.set_export(&[line("a-1", "first", "open")]);
+    let database = f.filed(Filing::Single {
+        project: Some("Gone".into()),
+    });
+    let report = f.run_database(&database, &f.scope()).unwrap();
+    assert!(report.created.is_empty());
+    let [Warning::Unmapped(unmapped)] = report.warnings.as_slice() else {
+        panic!("{:?}", report.warnings);
+    };
+    assert_eq!(unmapped.name, "Gone");
+    assert_eq!(unmapped.source, Source::Config);
+    let text = unmapped.to_string();
+    assert!(text.contains("(set by project in config)"), "{text}");
+}
+
+#[test]
+fn bd_project_setting_is_an_override() {
+    let f = fixture("a", "a");
+    fs::write(f.database.dir.join("project"), "Gone").unwrap();
+    f.set_export(&[line("a-1", "first", "open")]);
+    let report = f.run().unwrap();
+    assert!(report.created.is_empty());
+    let [Warning::Unmapped(unmapped)] = report.warnings.as_slice() else {
+        panic!("{:?}", report.warnings);
+    };
+    assert_eq!(unmapped.name, "Gone");
+    assert_eq!(unmapped.source, Source::Setting);
 }
 
 /// `line`, carrying `metadata` when given.
@@ -800,21 +884,8 @@ fn field_line(id: &str, title: &str, status: &str, metadata: Option<&str>) -> St
     }
 }
 
-fn claims(entries: &[(&[&str], &str)]) -> FieldClaims {
-    FieldClaims {
-        field: "metadata.repo".parse().unwrap(),
-        claims: entries
-            .iter()
-            .map(|(values, project)| Claim {
-                values: values.iter().map(|v| v.to_string()).collect(),
-                project: project.to_string(),
-            })
-            .collect(),
-    }
-}
-
-/// A checkout with prefix `zz`, and vault projects `A` and `B`.
-fn table() -> Fixture {
+/// A database with prefix `zz`, and vault projects `A` and `B`.
+fn split() -> Fixture {
     let f = fixture("zz", "repo");
     put(&f.vault, "Projects/A/A.md", "# A\n");
     put(&f.vault, "Projects/B/B.md", "# B\n");
@@ -822,22 +893,20 @@ fn table() -> Fixture {
     f
 }
 
-fn a_and_b() -> FieldClaims {
-    claims(&[(&["o/a"], "A"), (&["o/b"], "B")])
-}
+const A_AND_B: &[(&str, &str)] = &[("o/a", "A"), ("o/b", "B")];
 
 const ONE: &str = "Projects/A/one - zz-1.md";
 const INDEX: &str = "Inbox/Unfiled beads - zz.md";
 const REPO_A: Option<&str> = Some(r#"{"repo":"o/a"}"#);
 
 #[test]
-fn claimed_beads_file_under_their_project() {
-    let f = table();
+fn split_beads_file_under_their_project() {
+    let f = split();
     f.set_export(&[
         field_line("zz-1", "one", "open", REPO_A),
         field_line("zz-2", "two", "open", Some(r#"{"repo":"o/b"}"#)),
     ]);
-    let report = f.run_claims(&a_and_b(), false).unwrap();
+    let report = f.run_split(A_AND_B).unwrap();
     assert_eq!(
         report.created,
         paths(&[ONE, "Projects/B/two - zz-2.md", INDEX])
@@ -846,36 +915,47 @@ fn claimed_beads_file_under_their_project() {
     assert!(one.contains("\nprojects:\n  - \"[[A]]\"\n"), "{one}");
     let two = f.read("Projects/B/two - zz-2.md");
     assert!(two.contains("\nprojects:\n  - \"[[B]]\"\n"), "{two}");
-    assert!(report.unclaimed.is_empty(), "{:?}", report.unclaimed);
+    assert!(report.unfiled.is_empty(), "{:?}", report.unfiled);
     assert!(report.conditions.is_empty(), "{:?}", report.conditions);
 }
 
 #[test]
-fn value_list_claims_old_name() {
-    let f = table();
+fn two_values_map_to_one_project() {
+    let f = split();
     f.set_export(&[field_line(
         "zz-1",
         "one",
         "open",
         Some(r#"{"repo":"o/b-old"}"#),
     )]);
-    let report = f
-        .run_claims(&claims(&[(&["o/b", "o/b-old"], "B")]), false)
-        .unwrap();
+    let report = f.run_split(&[("o/b", "B"), ("o/b-old", "B")]).unwrap();
     assert_eq!(report.created, paths(&["Projects/B/one - zz-1.md", INDEX]));
 }
 
 #[test]
-fn unclaimed_bead_gets_no_note() {
-    let f = table();
+fn unmapped_value_files_under_its_last_segment() {
+    let f = split();
+    f.set_export(&[field_line(
+        "zz-1",
+        "one",
+        "open",
+        Some(r#"{"repo":"github.com/o/B/"}"#),
+    )]);
+    let report = f.run_split(&[]).unwrap();
+    assert_eq!(report.created, paths(&["Projects/B/one - zz-1.md", INDEX]));
+}
+
+#[test]
+fn unfiled_bead_gets_no_note() {
+    let f = split();
     f.set_export(&[field_line("zz-3", "three", "open", None)]);
     let before = f.snapshot_notes();
-    let report = f.run_claims(&a_and_b(), false).unwrap();
+    let report = f.run_split(A_AND_B).unwrap();
     assert_eq!(f.snapshot_notes(), before);
     assert_eq!(report.created, paths(&[INDEX]));
     assert_eq!(
-        report.unclaimed,
-        [Unclaimed {
+        report.unfiled,
+        [Unfiled {
             id: "zz-3".into(),
             title: "three".into(),
             status: "open".into(),
@@ -884,44 +964,44 @@ fn unclaimed_bead_gets_no_note() {
     );
     assert_eq!(
         report.conditions,
-        [Condition::Unclaimed {
+        [Condition::Unfiled {
             ids: vec!["zz-3".into()]
         }]
     );
 }
 
 #[test]
-fn non_string_field_is_unclaimed() {
-    let f = table();
+fn non_string_field_is_unfiled() {
+    let f = split();
     f.set_export(&[
         field_line("zz-1", "one", "open", Some(r#"{"repo":7}"#)),
         field_line("zz-2", "two", "open", Some(r#"{"repo":["o/a"]}"#)),
     ]);
     let before = f.snapshot_notes();
-    let report = f.run_claims(&a_and_b(), false).unwrap();
+    let report = f.run_split(A_AND_B).unwrap();
     assert_eq!(f.snapshot_notes(), before);
-    let reasons: Vec<&Reason> = report.unclaimed.iter().map(|u| &u.reason).collect();
+    let reasons: Vec<&Reason> = report.unfiled.iter().map(|u| &u.reason).collect();
     assert_eq!(
         reasons,
         [&Reason::Json("7".into()), &Reason::Json("[\"o/a\"]".into())]
     );
     assert_eq!(
         report.conditions,
-        [Condition::Unclaimed {
+        [Condition::Unfiled {
             ids: vec!["zz-1".into(), "zz-2".into()]
         }]
     );
 }
 
 #[test]
-fn missing_project_is_unclaimed() {
-    let f = table();
+fn missing_project_is_unfiled() {
+    let f = split();
     f.set_export(&[field_line("zz-1", "one", "open", REPO_A)]);
     let before = f.snapshot_notes();
-    let report = f.run_claims(&claims(&[(&["o/a"], "Gone")]), false).unwrap();
+    let report = f.run_split(&[("o/a", "Gone")]).unwrap();
     assert_eq!(f.snapshot_notes(), before);
     assert_eq!(
-        report.unclaimed[0].reason,
+        report.unfiled[0].reason,
         Reason::MissingProject("Gone".into())
     );
     assert_eq!(
@@ -939,10 +1019,10 @@ fn missing_project_is_unclaimed() {
 }
 
 #[test]
-fn unclaimed_existing_note_is_left_alone() {
-    let f = table();
+fn unfiled_existing_note_is_left_alone() {
+    let f = split();
     f.set_export(&[field_line("zz-1", "one", "open", REPO_A)]);
-    f.run_claims(&a_and_b(), false).unwrap();
+    f.run_split(A_AND_B).unwrap();
     let before = f.snapshot_notes();
     f.set_export(&[field_line(
         "zz-1",
@@ -950,22 +1030,22 @@ fn unclaimed_existing_note_is_left_alone() {
         "open",
         Some(r#"{"repo":"o/z"}"#),
     )]);
-    let report = f.run_claims(&a_and_b(), false).unwrap();
+    let report = f.run_split(A_AND_B).unwrap();
     assert_eq!(f.snapshot_notes(), before);
     assert!(report.removed.is_empty());
     assert_eq!(report.updated, paths(&[INDEX]));
-    assert_eq!(report.unclaimed[0].reason, Reason::Value("o/z".into()));
+    assert_eq!(report.unfiled[0].reason, Reason::MissingProject("z".into()));
 }
 
 #[test]
-fn moved_claimed_note_updates_in_place() {
-    let f = table();
+fn moved_split_note_updates_in_place() {
+    let f = split();
     f.set_export(&[field_line("zz-1", "one", "open", REPO_A)]);
-    f.run_claims(&a_and_b(), false).unwrap();
+    f.run_split(A_AND_B).unwrap();
     fs::create_dir_all(f.vault.join("Archives")).unwrap();
     fs::rename(f.vault.join(ONE), f.vault.join("Archives/one - zz-1.md")).unwrap();
     f.set_export(&[field_line("zz-1", "renamed", "open", REPO_A)]);
-    let report = f.run_claims(&a_and_b(), false).unwrap();
+    let report = f.run_split(A_AND_B).unwrap();
     assert_eq!(report.updated, paths(&["Archives/one - zz-1.md"]));
     assert!(report.created.is_empty());
     let names: Vec<_> = fs::read_dir(f.vault.join("Projects/A"))
@@ -976,56 +1056,45 @@ fn moved_claimed_note_updates_in_place() {
 }
 
 #[test]
-fn link_to_unclaimed_bead_shows_id() {
-    let f = table();
+fn link_to_unfiled_bead_shows_id() {
+    let f = split();
     let deps = r#","dependencies":[{"issue_id":"zz-1","depends_on_id":"zz-2","type":"parent-child","created_at":"2026-10-11T02:21:06Z"},{"issue_id":"zz-1","depends_on_id":"zz-2","type":"blocks","created_at":"2026-10-11T02:21:06Z"}]}"#;
     let child = field_line("zz-1", "one", "open", REPO_A);
     let child = format!("{}{deps}", child.strip_suffix('}').unwrap());
     f.set_export(&[child, field_line("zz-2", "first", "open", None)]);
-    let report = f.run_claims(&a_and_b(), false).unwrap();
+    let report = f.run_split(A_AND_B).unwrap();
     assert_eq!(report.created, paths(&[ONE, INDEX]));
     assert_links_show(&f.read(ONE), "zz-2");
 }
 
 #[test]
-fn degraded_skips_removal() {
-    let f = table();
+fn split_removal_marks_absent_beads() {
+    let f = split();
     f.set_export(&[field_line("zz-1", "one", "open", REPO_A)]);
-    f.run_claims(&a_and_b(), false).unwrap();
+    f.run_split(A_AND_B).unwrap();
     f.set_export(&[]);
-    let before = f.snapshot();
-    let report = f.run_claims(&a_and_b(), true).unwrap();
-    assert_eq!(f.snapshot(), before);
-    assert!(report.removed.is_empty());
-    assert!(report.degraded);
-    assert!(
-        has_warning(&report, |w| matches!(w, Warning::Degraded)),
-        "{:?}",
-        report.warnings
-    );
-    let report = f.run_claims(&a_and_b(), false).unwrap();
+    let report = f.run_split(A_AND_B).unwrap();
     assert_eq!(report.removed, paths(&[ONE]));
-    assert!(!report.degraded);
 }
 
 #[test]
-fn table_sync_ignores_project_override() {
-    let f = table();
-    fs::write(f.repo.root.join(".beads/project"), "A").unwrap();
+fn split_ignores_project_override() {
+    let f = split();
+    fs::write(f.database.dir.join("project"), "A").unwrap();
     f.set_export(&[field_line("zz-1", "one", "open", Some(r#"{"repo":"o/b"}"#))]);
-    let report = f.run_claims(&a_and_b(), false).unwrap();
+    let report = f.run_split(A_AND_B).unwrap();
     assert_eq!(report.created, paths(&["Projects/B/one - zz-1.md", INDEX]));
 }
 
 const VALID_INDEX: &str = "---\ngeneratedBy: callisto\nbeadPrefix: zz\n---\n";
 
-/// Exports claimed `zz-1` and unclaimed `zz-3`, and runs.
+/// Exports filed `zz-1` and unfiled `zz-3`, and runs.
 fn index_run(f: &Fixture) -> Report {
     f.set_export(&[
         field_line("zz-1", "one", "open", REPO_A),
         field_line("zz-3", "three", "open", None),
     ]);
-    f.run_claims(&a_and_b(), false).unwrap()
+    f.run_split(A_AND_B).unwrap()
 }
 
 fn has_condition(report: &Report, want: &Condition) -> bool {
@@ -1033,8 +1102,8 @@ fn has_condition(report: &Report, want: &Condition) -> bool {
 }
 
 #[test]
-fn index_lists_unclaimed() {
-    let f = table();
+fn index_lists_unfiled() {
+    let f = split();
     let report = index_run(&f);
     assert_eq!(report.created, paths(&[ONE, INDEX]));
     let index = f.read(INDEX);
@@ -1046,23 +1115,23 @@ fn index_lists_unclaimed() {
 }
 
 #[test]
-fn index_empties_once_claimed() {
-    let f = table();
+fn index_empties_once_filed() {
+    let f = split();
     index_run(&f);
     f.set_export(&[
         field_line("zz-1", "one", "open", REPO_A),
         field_line("zz-3", "three", "open", Some(r#"{"repo":"o/b"}"#)),
     ]);
-    let report = f.run_claims(&a_and_b(), false).unwrap();
+    let report = f.run_split(A_AND_B).unwrap();
     assert!(report.updated.contains(&PathBuf::from(INDEX)), "{report:?}");
     let index = f.read(INDEX);
-    assert!(index.contains("No unclaimed beads."), "{index}");
+    assert!(index.contains("No unfiled beads."), "{index}");
     assert!(f.vault.join("Projects/B/three - zz-3.md").is_file());
 }
 
 #[test]
 fn unchanged_index_is_not_rewritten() {
-    let f = table();
+    let f = split();
     index_run(&f);
     let before = f.snapshot()[Path::new(INDEX)].clone();
     let report = index_run(&f);
@@ -1073,7 +1142,7 @@ fn unchanged_index_is_not_rewritten() {
 
 #[test]
 fn missing_unfiled_folder() {
-    let f = table();
+    let f = split();
     fs::remove_dir(f.vault.join("Inbox")).unwrap();
     let report = index_run(&f);
     assert_eq!(report.created, paths(&[ONE]));
@@ -1097,7 +1166,7 @@ fn assert_index_taken(f: &Fixture, text: &str) {
         field_line("zz-3", "three", "open", None),
         field_line("zz-9", "nine", "open", None),
     ]);
-    let report = f.run_claims(&a_and_b(), false).unwrap();
+    let report = f.run_split(A_AND_B).unwrap();
     assert_eq!(f.read(INDEX), text);
     assert!(
         has_condition(&report, &Condition::IndexTaken { path: INDEX.into() }),
@@ -1108,13 +1177,13 @@ fn assert_index_taken(f: &Fixture, text: &str) {
 
 #[test]
 fn hand_written_index_is_taken() {
-    assert_index_taken(&table(), "# mine\n");
+    assert_index_taken(&split(), "# mine\n");
 }
 
 #[test]
 fn bead_note_at_index_is_taken() {
     assert_index_taken(
-        &table(),
+        &split(),
         "---\nbead: zz-9\ngeneratedBy: callisto\nbeadPrefix: zz\n---\n",
     );
 }
@@ -1122,14 +1191,14 @@ fn bead_note_at_index_is_taken() {
 #[test]
 fn other_prefix_index_is_taken() {
     assert_index_taken(
-        &table(),
+        &split(),
         "---\ngeneratedBy: callisto\nbeadPrefix: yy\n---\n",
     );
 }
 
 #[test]
 fn non_utf8_index_is_taken() {
-    let f = table();
+    let f = split();
     let bytes = b"---\ngeneratedBy: callisto\nbeadPrefix: zz\n---\n\xff\n";
     fs::write(f.vault.join(INDEX), bytes).unwrap();
     let report = index_run(&f);
@@ -1143,7 +1212,7 @@ fn non_utf8_index_is_taken() {
 
 #[test]
 fn symlinked_index_is_taken() {
-    let f = table();
+    let f = split();
     put(&f.vault, "Inbox/real.md", VALID_INDEX);
     std::os::unix::fs::symlink(f.vault.join("Inbox/real.md"), f.vault.join(INDEX)).unwrap();
     let report = index_run(&f);
@@ -1162,47 +1231,7 @@ fn symlinked_index_is_taken() {
 }
 
 #[test]
-fn degraded_writes_no_index() {
-    let f = table();
-    f.set_export(&[field_line("zz-3", "three", "open", None)]);
-    let report = f.run_claims(&a_and_b(), true).unwrap();
-    assert!(!f.vault.join(INDEX).exists());
-    assert!(
-        !report.conditions.iter().any(|c| matches!(
-            c,
-            Condition::UnfiledMissing { .. } | Condition::IndexTaken { .. }
-        )),
-        "{:?}",
-        report.conditions
-    );
-}
-
-#[test]
-fn degraded_keeps_existing_index() {
-    let f = table();
-    f.set_export(&[field_line("zz-3", "three", "open", None)]);
-    f.run_claims(&a_and_b(), false).unwrap();
-    assert!(f.read(INDEX).contains("zz-3"));
-    f.set_export(&[field_line("zz-3", "three", "open", REPO_A)]);
-    let before = f.snapshot();
-    let report = f.run_claims(&a_and_b(), true).unwrap();
-    assert_eq!(
-        f.snapshot().get(Path::new(INDEX)),
-        before.get(Path::new(INDEX))
-    );
-    assert!(before.contains_key(Path::new(INDEX)));
-    assert!(
-        !report.conditions.iter().any(|c| matches!(
-            c,
-            Condition::UnfiledMissing { .. } | Condition::IndexTaken { .. }
-        )),
-        "{:?}",
-        report.conditions
-    );
-}
-
-#[test]
-fn path_group_writes_no_index() {
+fn single_database_writes_no_index() {
     let f = fixture("a", "a");
     fs::create_dir_all(f.vault.join("Inbox")).unwrap();
     f.set_export(&[line("a-1", "first", "open")]);
@@ -1213,7 +1242,7 @@ fn path_group_writes_no_index() {
 
 #[test]
 fn index_is_not_a_bead_note() {
-    let f = table();
+    let f = split();
     index_run(&f);
     let index = Index::scan(&f.vault).unwrap();
     assert!(

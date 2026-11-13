@@ -3,14 +3,13 @@
 use std::fs;
 use std::path::Path;
 
-use callisto::config::{Config, RepoEntry};
+use callisto::config::{Config, Filing};
 
 const OPTIONS: &[&str] = &[
     "enable",
     "package",
     "vault",
-    "repos",
-    "field",
+    "databases",
     "unfiled",
     "path",
     "startInterval",
@@ -46,15 +45,15 @@ fn readme_config_examples_load() {
         fs::write(&file, block).unwrap();
         let config =
             Config::load(&file, Some(Path::new("/h"))).unwrap_or_else(|e| panic!("{e}\n{block}"));
-        assert!(!config.repos.is_empty(), "no repos in\n{block}");
+        assert!(!config.databases.is_empty(), "no databases in\n{block}");
         configs.push(config);
     }
     assert_eq!(configs[0].vault, Some("/h/org".into()));
-    let tables = configs
+    let split = configs
         .iter()
-        .flat_map(|c| &c.repos)
-        .any(|r| matches!(r, RepoEntry::Table(_)));
-    assert!(tables, "no table example");
+        .flat_map(|c| &c.databases)
+        .any(|d| matches!(d.filing, Filing::Split(_)));
+    assert!(split, "no split example");
 }
 
 #[test]

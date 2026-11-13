@@ -50,7 +50,7 @@ fn is_scaffolding(record: &Record) -> bool {
         || SCAFFOLDING_TYPES.contains(&record.bead.issue_type.as_str())
 }
 
-/// One repo's export, split by whether a bead gets a note.
+/// One database's export, split by whether a bead gets a note.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Export {
     pub beads: Vec<Bead>,
@@ -141,19 +141,11 @@ impl From<ParseError> for ExportError {
     }
 }
 
-/// Exports every bead in the repo at `checkout`. Any failure means the
-/// export is not authoritative and the repo's sync MUST stop.
-pub fn export(bd: &Bd, checkout: &Path) -> Result<Export, ExportError> {
-    export_with_field(bd, checkout, None)
-}
-
-/// Like [`export`], also resolving `field` on every bead that gets a note.
-pub fn export_with_field(
-    bd: &Bd,
-    checkout: &Path,
-    field: Option<&FieldPath>,
-) -> Result<Export, ExportError> {
-    let jsonl = bd.run(checkout, &["export"])?;
+/// Exports every bead in the database at `database`, resolving `field`
+/// on every bead that gets a note. Any failure means the export is not
+/// authoritative and the database's sync MUST stop.
+pub fn export(bd: &Bd, database: &Path, field: Option<&FieldPath>) -> Result<Export, ExportError> {
+    let jsonl = bd.run_on(database, &["export"])?;
     Ok(parse_with_field(&jsonl, field)?)
 }
 
@@ -282,7 +274,7 @@ mod tests {
     fn export_parses_bd_output() {
         let tmp = tempfile::tempdir().unwrap();
         let bd = fake_export(tmp.path(), &format!("{}\n{}", line(""), line("")));
-        assert_eq!(export(&bd, tmp.path()).unwrap().beads.len(), 2);
+        assert_eq!(export(&bd, tmp.path(), None).unwrap().beads.len(), 2);
     }
 
     #[test]
@@ -293,7 +285,7 @@ mod tests {
             "echo 'Error: no beads database found' >&2; exit 1",
         ));
         assert!(matches!(
-            export(&bd, tmp.path()),
+            export(&bd, tmp.path(), None),
             Err(ExportError::Bd(BdError::Failed { .. }))
         ));
     }
@@ -302,7 +294,7 @@ mod tests {
     fn export_fails_on_bad_line() {
         let tmp = tempfile::tempdir().unwrap();
         let bd = fake_export(tmp.path(), &format!("{}\ngarbage", line("")));
-        match export(&bd, tmp.path()) {
+        match export(&bd, tmp.path(), None) {
             Err(ExportError::Parse(e)) => assert_eq!(e.line, 2),
             other => panic!("expected a parse error, got {other:?}"),
         }
@@ -364,10 +356,10 @@ mod tests {
     }
 
     #[test]
-    fn export_with_field_resolves() {
+    fn export_resolves_the_field() {
         let tmp = tempfile::tempdir().unwrap();
         let bd = fake_export(tmp.path(), &line(r#","metadata":{"repo":"r"}"#));
-        let export = export_with_field(&bd, tmp.path(), Some(&repo_path())).unwrap();
+        let export = export(&bd, tmp.path(), Some(&repo_path())).unwrap();
         assert_eq!(export.fields["x-1"], FieldValue::String("r".into()));
     }
 }

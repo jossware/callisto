@@ -73,7 +73,7 @@
               inherit system;
               settings = {
                 enable = true;
-                repos = [ "~/Workspaces/callisto" ];
+                databases = [ { beads_dir = "~/Workspaces/callisto/.beads"; } ];
               };
             };
             unit = name: hm.xdg.configFile."systemd/user/${name}".source;
@@ -104,12 +104,24 @@
               nativeBuildInputs = [ pkgs.python3 ];
               full = toml {
                 vault = "~/org";
-                repos = [
-                  "~/Workspaces/a"
-                  "/srv/b"
+                databases = [
+                  { beads_dir = "~/Workspaces/a/.beads"; }
+                  {
+                    beads_dir = "/srv/b/.beads";
+                    project = "B";
+                  }
+                  {
+                    beads_dir = "/srv/c/.beads";
+                    split.by = "metadata.repo";
+                    split.projects."github.com/o/api" = "API";
+                  }
+                  {
+                    beads_dir = "/srv/d/.beads";
+                    split.by = "x";
+                  }
                 ];
               };
-              reposOnly = toml { repos = [ "/srv/b" ]; };
+              databasesOnly = toml { databases = [ { beads_dir = "/srv/b/.beads"; } ]; };
             }
             ''
               python3 - <<'PY'
@@ -118,9 +130,23 @@
                   with open(os.environ[var], "rb") as f:
                       return tomllib.load(f)
               full = load("full")
-              assert full == {"vault": "~/org", "repos": ["~/Workspaces/a", "/srv/b"]}, full
-              repos_only = load("reposOnly")
-              assert repos_only == {"repos": ["/srv/b"]}, repos_only
+              assert full == {
+                  "vault": "~/org",
+                  "databases": [
+                      {"beads_dir": "~/Workspaces/a/.beads"},
+                      {"beads_dir": "/srv/b/.beads", "project": "B"},
+                      {
+                          "beads_dir": "/srv/c/.beads",
+                          "split": {
+                              "by": "metadata.repo",
+                              "projects": {"github.com/o/api": "API"},
+                          },
+                      },
+                      {"beads_dir": "/srv/d/.beads", "split": {"by": "x"}},
+                  ],
+              }, full
+              databases_only = load("databasesOnly")
+              assert databases_only == {"databases": [{"beads_dir": "/srv/b/.beads"}]}, databases_only
               PY
               touch $out
             '';
@@ -130,39 +156,35 @@
           pname = "callisto-config-loader";
           CALLISTO_HM_CONFIG_DIR = pkgs.linkFarm "callisto-hm-configs" [
             {
-              name = "mixed.toml";
+              name = "single.toml";
               path = toml {
                 vault = "~/org";
-                field = "metadata.repo";
-                unfiled = "Inbox/Beads";
-                repos = [
-                  "~/Workspaces/callisto"
+                databases = [
+                  { beads_dir = "~/Workspaces/callisto/.beads"; }
                   {
-                    path = "~/work/p";
-                    value = "github.com/o/p";
-                    project = "P";
+                    beads_dir = "~/.dotfiles/.beads";
+                    project = "dotfiles";
                   }
                 ];
               };
             }
             {
-              name = "tables-only.toml";
+              name = "split.toml";
               path = toml {
                 vault = "~/org";
-                field = "metadata.repo";
-                repos = [
+                unfiled = "Inbox/Beads";
+                databases = [
                   {
-                    path = "/srv/q";
-                    field = "x.y";
-                    value = [
-                      "a"
-                      "b"
-                    ];
+                    beads_dir = "/srv/tasksdb/.beads";
+                    split.by = "metadata.repo";
+                    split.projects = {
+                      "github.com/o/api" = "API";
+                      "github.com/o/web" = "Web";
+                    };
                   }
-                  { path = "/srv/r"; }
                   {
-                    path = "/srv/s";
-                    value = [ "one" ];
+                    beads_dir = "/srv/other/.beads";
+                    split.by = "x.y";
                   }
                 ];
               };

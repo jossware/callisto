@@ -1,18 +1,10 @@
 //! Loads the files the home-manager module generates. `checks.config-loader`
 //! supplies them; the test is ignored everywhere else.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use callisto::config::{Config, RepoEntry, TableEntry};
-
-fn table(path: &str, field: &str, value: Option<&[&str]>, project: Option<&str>) -> RepoEntry {
-    RepoEntry::Table(TableEntry {
-        path: PathBuf::from(path),
-        field: field.to_string(),
-        value: value.map(|v| v.iter().map(|s| s.to_string()).collect()),
-        project: project.map(str::to_string),
-    })
-}
+use callisto::config::{Config, DatabaseEntry, Filing, Split};
 
 #[test]
 #[ignore]
@@ -23,33 +15,48 @@ fn module_config_loads() {
     let load = |name: &str| Config::load(&dir.join(name), Some(Path::new("/h"))).unwrap();
 
     assert_eq!(
-        load("mixed.toml"),
+        load("single.toml"),
         Config {
             vault: Some(PathBuf::from("/h/org")),
-            field: Some("metadata.repo".to_string()),
-            unfiled: PathBuf::from("Inbox/Beads"),
-            repos: vec![
-                RepoEntry::Path(PathBuf::from("/h/Workspaces/callisto")),
-                table(
-                    "/h/work/p",
-                    "metadata.repo",
-                    Some(&["github.com/o/p"]),
-                    Some("P")
-                ),
+            unfiled: PathBuf::from("Inbox"),
+            databases: vec![
+                DatabaseEntry {
+                    beads_dir: PathBuf::from("/h/Workspaces/callisto/.beads"),
+                    filing: Filing::Single { project: None },
+                },
+                DatabaseEntry {
+                    beads_dir: PathBuf::from("/h/.dotfiles/.beads"),
+                    filing: Filing::Single {
+                        project: Some("dotfiles".into()),
+                    },
+                },
             ],
         }
     );
 
     assert_eq!(
-        load("tables-only.toml"),
+        load("split.toml"),
         Config {
             vault: Some(PathBuf::from("/h/org")),
-            field: Some("metadata.repo".to_string()),
-            unfiled: PathBuf::from("Inbox"),
-            repos: vec![
-                table("/srv/q", "x.y", Some(&["a", "b"]), None),
-                table("/srv/r", "metadata.repo", None, None),
-                table("/srv/s", "metadata.repo", Some(&["one"]), None),
+            unfiled: PathBuf::from("Inbox/Beads"),
+            databases: vec![
+                DatabaseEntry {
+                    beads_dir: PathBuf::from("/srv/tasksdb/.beads"),
+                    filing: Filing::Split(Split {
+                        by: "metadata.repo".parse().unwrap(),
+                        projects: BTreeMap::from([
+                            ("github.com/o/api".into(), "API".into()),
+                            ("github.com/o/web".into(), "Web".into()),
+                        ]),
+                    }),
+                },
+                DatabaseEntry {
+                    beads_dir: PathBuf::from("/srv/other/.beads"),
+                    filing: Filing::Split(Split {
+                        by: "x.y".parse().unwrap(),
+                        projects: BTreeMap::new(),
+                    }),
+                },
             ],
         }
     );

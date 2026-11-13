@@ -1,4 +1,5 @@
-//! `callisto sync`: mirror the given repos, or every configured one.
+//! `callisto sync`: mirror the databases of the given repos, or every
+//! configured database.
 
 use std::fmt::Display;
 use std::io::{self, Write};
@@ -8,12 +9,11 @@ use std::process::ExitCode;
 use jiff::tz::TimeZone;
 
 use crate::bd::Bd;
-use crate::config::{self, Config, RepoEntry, VaultError};
+use crate::config::{self, Config, VaultError};
+use crate::database::{self, Database, Databases, Target};
 use crate::errlog::{self, Entry, Stage};
-use crate::group::{FieldClaims, Group, Groups, Ownership};
 use crate::lock::{self, Lock};
 use crate::paths::{self, Env};
-use crate::remote::Git;
 use crate::repo::{self, Repo};
 use crate::standing::{self, Condition, Subject, Summary};
 use crate::sync::{self, Report, Request};
@@ -49,18 +49,18 @@ impl Out<'_> {
         errlog::record(&self.log, &entry);
     }
 
-    fn report(&mut self, repo: &Repo, report: &Report) {
+    fn report(&mut self, database: &Database, report: &Report) {
         for warning in &report.warnings {
             let _ = writeln!(
                 self.err,
                 "callisto: {}: warning: {warning}",
-                repo.root.display()
+                database.dir.display()
             );
         }
         let _ = writeln!(
             self.out,
             "{}: {} created, {} updated, {} removed, {} unchanged",
-            repo.name,
+            database.name,
             report.created.len(),
             report.updated.len(),
             report.removed.len(),
@@ -125,150 +125,91 @@ fn sync(args: &Args, env: &Env, bd: &Bd, cwd: &Path, state: &Path, out: &mut Out
         let error = format!("{}: vault is not a directory", vault.display());
         return out.fail(Stage::Vault, None, error);
     }
-    if args.all && config.repos.is_empty() {
-        let error = format!("sync --all: no repos configured in {}", config_file());
+    if args.all && config.databases.is_empty() {
+        let error = format!("sync --all: no databases configured in {}", config_file());
         return out.fail(Stage::Config, None, error);
     }
     let lock = match lock::acquire(&paths::sync_lock(state)) {
         Ok(lock) => lock,
         Err(e) => return out.fail(Stage::Lock, None, e),
     };
-    let git = Git::default();
-    let (repos, mut groups) = if args.all {
-        let mut groups = Groups::derive(bd, &config.repos);
-        let repos = resolve(&all_targets(&config, &groups), out);
-        // With no prefix read yet no claim resolves, so this settles only
-        // the rules that need no value: enough to skip a broken group's
-        // pull.
-        groups.resolve(&git);
-        (repos, groups)
+    let mut databases = Databases::new(&config.databases);
+    let targets = if args.all {
+        let (pulled, missing) = pull(bd, &databases, out);
+        // With nothing pulled there is nothing to sync, so no prefix is
+        // worth reading.
+        if pulled.is_empty() {
+            let summaries = [standing::config_summary(missing)];
+            return finish(&lock, state, &summaries, out);
+        }
+        // After the pulls, so the prefixes are read from pulled data.
+        databases.read_prefixes(bd);
+        pulled
+            .into_iter()
+            .filter(|d| databases.prefix(&d.dir).is_some())
+            .collect()
     } else {
-        let targets: Vec<PathBuf> = if args.repos.is_empty() {
+        let paths: Vec<PathBuf> = if args.repos.is_empty() {
             vec![cwd.to_path_buf()]
         } else {
             args.repos.iter().map(|p| cwd.join(p)).collect()
         };
-        let repos = resolve(&targets, out);
+        let repos = resolve(&paths, out);
         if repos.is_empty() {
             return;
         }
-        (repos, Groups::derive(bd, &config.repos))
+        let targets = find(bd, &databases, &repos, out);
+        databases.read_prefixes(bd);
+        targets
     };
-    // Before the prefixes, so they are read from pulled data.
-    let pulled = args.all.then(|| pull(bd, &groups, &repos, out));
-    let tables = config
-        .repos
-        .iter()
-        .any(|e| matches!(e, RepoEntry::Table(_)));
-    // With nothing pulled there is nothing to sync, but a table entry
-    // still needs its group's prefix to resolve.
-    if pulled.as_ref().is_none_or(|p| !p.is_empty()) || tables {
-        groups.read_prefixes(bd);
-    }
-    groups.resolve(&git);
-    let mut summaries = vec![standing::config_summary(groups.conditions())];
-    let scope = groups.scope();
+    let mut summaries = vec![standing::config_summary(databases.conditions())];
+    let scope = databases.scope();
     let tz = TimeZone::system();
-    let mut sync_one = |repo: &Repo, group: Option<&Group>, listed: bool, out: &mut Out| {
-        let subject = match group {
-            Some(group) => Subject::group(group),
-            None => Subject::Checkout(repo.root.clone()),
-        };
-        let (claims, degraded) = match plan(&groups, group, listed) {
-            Plan::Sync { claims, degraded } => (claims, degraded),
-            Plan::Skip(condition) => {
-                return summaries.push(Summary {
-                    subject,
-                    conditions: vec![condition],
-                });
-            }
-        };
+    for database in &targets {
         let req = Request {
             bd,
             vault: &vault,
-            repo,
+            database,
+            configured: databases.configured(&database.dir).is_some(),
             scope: &scope,
             tz: &tz,
-            claims,
-            degraded,
             unfiled: &config.unfiled,
         };
-        match sync::sync_repo(&lock, &req) {
+        match sync::sync_database(&lock, &req) {
             Ok(report) => {
-                out.report(repo, &report);
+                out.report(database, &report);
                 summaries.push(Summary {
-                    subject,
+                    subject: Subject::Database(database.dir.clone()),
                     conditions: report.conditions,
                 });
             }
-            Err(e) => out.fail(e.stage(), Some(&repo.root), e),
-        }
-    };
-    if let Some(pulled) = &pulled {
-        for repo in pulled {
-            sync_one(repo, groups.of_member(&repo.root), true, out);
-        }
-    } else {
-        let mut synced: Vec<&Path> = Vec::new();
-        for target in &repos {
-            match groups.of_target(bd, target) {
-                Ok(Some(group)) => {
-                    if synced.contains(&group.database.as_path()) {
-                        continue;
-                    }
-                    synced.push(&group.database);
-                    sync_one(group.representative(Some(target)), Some(group), true, out);
-                }
-                Ok(None) => sync_one(target, None, false, out),
-                Err(e) => out.fail(Stage::Config, Some(&target.root), e),
-            }
+            Err(e) => out.fail(e.stage(), Some(&database.dir), e),
         }
     }
     finish(&lock, state, &summaries, out);
 }
 
-pub(crate) enum Plan<'a> {
-    Sync {
-        claims: Option<&'a FieldClaims>,
-        degraded: bool,
-    },
-    /// Not synced; the condition says why.
-    Skip(Condition),
-}
-
-/// How a run treats a target in `group`, or in no group. `listed` says
-/// whether the target is a configured repo.
-pub(crate) fn plan<'a>(groups: &'a Groups, group: Option<&'a Group>, listed: bool) -> Plan<'a> {
-    match group.map(|g| &g.ownership) {
-        Some(Ownership::Broken(reason)) => Plan::Skip(Condition::GroupRule {
-            reason: reason.clone(),
-        }),
-        Some(Ownership::Field(claims)) => Plan::Sync {
-            claims: Some(claims),
-            degraded: groups.degraded(),
-        },
-        // An unresolvable table entry may be this checkout, whose beads
-        // it would then file under the wrong project.
-        None if !listed && groups.degraded() => Plan::Skip(Condition::UnlistedSkipped),
-        Some(Ownership::Prefix) | None => Plan::Sync {
-            claims: None,
-            degraded: false,
-        },
+/// The databases `repos` use, each once, in order.
+fn find(bd: &Bd, databases: &Databases, repos: &[Repo], out: &mut Out) -> Vec<Database> {
+    let mut found: Vec<Database> = Vec::new();
+    for repo in repos {
+        let database = match database::find(bd, databases, repo) {
+            Ok(Target::Configured(database) | Target::Local(database)) => database,
+            Ok(Target::Unconfigured(dir)) => {
+                let error = format!("database {} is not configured", dir.display());
+                out.fail(Stage::Config, Some(&repo.root), error);
+                continue;
+            }
+            Err(e) => {
+                out.fail(Stage::Config, Some(&repo.root), e);
+                continue;
+            }
+        };
+        if !found.iter().any(|d| d.dir == database.dir) {
+            found.push(database);
+        }
     }
-}
-
-/// The configured paths, less the table entries `groups` could not
-/// place: their unresolvable condition is their only report.
-fn all_targets(config: &Config, groups: &Groups) -> Vec<PathBuf> {
-    config
-        .repos
-        .iter()
-        .filter(|entry| match entry {
-            RepoEntry::Path(_) => true,
-            RepoEntry::Table(_) => groups.placed(entry),
-        })
-        .map(|entry| entry.path().to_path_buf())
-        .collect()
+    found
 }
 
 /// Prints and records the run's summaries while the caller still holds
@@ -288,81 +229,31 @@ fn finish(lock: &Lock, state: &Path, summaries: &[Summary], out: &mut Out) {
     }
 }
 
-/// Reports the resolved repos `groups` could not place, then pulls each
-/// group once, in its first resolved member. Returns the repos to sync,
-/// including an unpulled member of each broken group so its rule break
-/// is reported.
-fn pull(bd: &Bd, groups: &Groups, repos: &[Repo], out: &mut Out) -> Vec<Repo> {
-    let resolved = |root: &Path| repos.iter().any(|r| r.root == root);
-    let errored = |root: &Path| {
-        groups
-            .ungrouped
-            .iter()
-            .any(|u| u.error.is_some() && u.repo.as_ref().is_some_and(|r| r.root == root))
-    };
-    for ungrouped in &groups.ungrouped {
-        if let (Some(repo), Some(e)) = (&ungrouped.repo, &ungrouped.error)
-            && resolved(&repo.root)
-        {
-            out.fail(Stage::Config, Some(&repo.root), e);
-        }
-    }
+/// Pulls each configured database whose directory exists. Returns the
+/// pulled databases, and a condition for each missing directory.
+fn pull(bd: &Bd, databases: &Databases, out: &mut Out) -> (Vec<Database>, Vec<Condition>) {
     let mut pulled = Vec::new();
-    let mut tried: Vec<&Path> = Vec::new();
-    for group in &groups.groups {
-        let Some(member) = group.members.iter().find(|m| resolved(&m.root)) else {
-            continue;
-        };
-        tried.push(&group.database);
-        if broken(group) || pull_in(bd, member, out) {
-            pulled.push(member.clone());
-        }
-    }
-    // A resolved repo need not be configured, so grouping may never have
-    // placed it.
-    for repo in repos {
-        if groups.of_member(&repo.root).is_some() || errored(&repo.root) {
+    let mut missing = Vec::new();
+    for database in databases.all() {
+        if !database.dir.is_dir() {
+            missing.push(Condition::Unreadable {
+                database: database.dir.clone(),
+                reason: "no such directory".to_string(),
+            });
             continue;
         }
-        let (synced, unpulled) = match groups.of_target(bd, repo) {
-            Ok(Some(group)) => {
-                if tried.contains(&group.database.as_path()) {
-                    continue;
-                }
-                tried.push(&group.database);
-                (group.representative(Some(repo)), broken(group))
-            }
-            Ok(None) => (repo, false),
-            Err(e) => {
-                out.fail(Stage::Config, Some(&repo.root), e);
-                continue;
-            }
-        };
-        if unpulled || pull_in(bd, repo, out) {
-            pulled.push(synced.clone());
+        match bd.run_on(&database.dir, &["dolt", "pull"]) {
+            Ok(_) => pulled.push(database.clone()),
+            Err(e) => out.fail(Stage::Pull, Some(&database.dir), e),
         }
     }
-    pulled
+    (pulled, missing)
 }
 
-fn broken(group: &Group) -> bool {
-    matches!(group.ownership, Ownership::Broken(_))
-}
-
-fn pull_in(bd: &Bd, repo: &Repo, out: &mut Out) -> bool {
-    match bd.run(&repo.root, &["dolt", "pull"]) {
-        Ok(_) => true,
-        Err(e) => {
-            out.fail(Stage::Pull, Some(&repo.root), e);
-            false
-        }
-    }
-}
-
-/// The repos `targets` name, each main checkout once, in order.
-fn resolve(targets: &[PathBuf], out: &mut Out) -> Vec<Repo> {
+/// The repos `paths` name, each main checkout once, in order.
+fn resolve(paths: &[PathBuf], out: &mut Out) -> Vec<Repo> {
     let mut repos: Vec<Repo> = Vec::new();
-    for path in targets {
+    for path in paths {
         // locate walks lexical ancestors and accepts missing paths, so a
         // mistyped `typo` or `../notes` would land on the enclosing repo.
         let real = match path.canonicalize() {
@@ -380,9 +271,7 @@ fn resolve(targets: &[PathBuf], out: &mut Out) -> Vec<Repo> {
             out.fail(Stage::Config, Some(path), "not in a repository");
             continue;
         };
-        if !repo.has_beads() {
-            out.fail(Stage::Config, Some(&repo.root), "no .beads directory");
-        } else if !repos.iter().any(|r| r.root == repo.root) {
+        if !repos.iter().any(|r| r.root == repo.root) {
             repos.push(repo);
         }
     }

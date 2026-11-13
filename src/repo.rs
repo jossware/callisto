@@ -17,9 +17,6 @@ pub const PROJECT_KEY: &str = "custom.obsidian.project";
 pub struct Repo {
     /// The main checkout, canonical.
     pub root: PathBuf,
-    /// The main checkout's directory name. Leading dots are kept, so
-    /// `~/.dotfiles` needs a project override.
-    pub name: String,
 }
 
 impl Repo {
@@ -28,11 +25,11 @@ impl Repo {
     }
 }
 
-/// What a repo's bd config says about syncing it.
+/// What a database's bd config says about syncing it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
     pub prefix: String,
-    /// The vault project to file under, when it is not the repo's name.
+    /// The vault project to file under, when it is not the default name.
     pub project: Option<String>,
 }
 
@@ -66,12 +63,13 @@ impl From<BdError> for SettingsError {
     }
 }
 
-/// A repo without a prefix is an error: no note could be scoped to it.
-pub fn settings(bd: &Bd, repo: &Repo) -> Result<Settings, SettingsError> {
+/// A database without a prefix is an error: no note could be scoped to
+/// it.
+pub fn settings(bd: &Bd, database: &Path) -> Result<Settings, SettingsError> {
     let prefix = bd
-        .config_get(&repo.root, PREFIX_KEY)?
+        .config_get_on(database, PREFIX_KEY)?
         .ok_or(SettingsError::NoPrefix)?;
-    let project = bd.config_get(&repo.root, PROJECT_KEY)?;
+    let project = bd.config_get_on(database, PROJECT_KEY)?;
     Ok(Settings { prefix, project })
 }
 
@@ -98,14 +96,14 @@ pub fn locate(dir: &Path) -> Option<Repo> {
 fn markers(level: &Path) -> Level {
     let jj = level.join(".jj").join("repo");
     match fs::metadata(&jj) {
-        Ok(meta) if meta.is_dir() => return checkout(level, None),
+        Ok(meta) if meta.is_dir() => return checkout(level),
         Ok(_) => return jj_workspace(level, &jj),
         Err(_) if present(&jj) => return Level::Broken,
         Err(_) => {}
     }
     let git = level.join(".git");
     match fs::metadata(&git) {
-        Ok(meta) if meta.is_dir() => checkout(level, None),
+        Ok(meta) if meta.is_dir() => checkout(level),
         Ok(_) => git_file(level, &git),
         Err(_) if present(&git) => Level::Broken,
         Err(_) => Level::NoMarker,
@@ -118,13 +116,9 @@ fn present(marker: &Path) -> bool {
     fs::symlink_metadata(marker).is_ok()
 }
 
-/// `name` overrides the root's own name, for worktrees of a bare repo.
-fn checkout(root: &Path, name: Option<String>) -> Level {
+fn checkout(root: &Path) -> Level {
     match fs::canonicalize(root) {
-        Ok(root) => Level::Checkout(Repo {
-            name: name.unwrap_or_else(|| basename(&root)),
-            root,
-        }),
+        Ok(root) => Level::Checkout(Repo { root }),
         Err(_) => Level::Broken,
     }
 }
@@ -141,18 +135,18 @@ fn git_file(level: &Path, file: &Path) -> Level {
     let commondir = gitdir.join("commondir");
     if !present(&commondir) {
         // Submodules and `--separate-git-dir` checkouts own their git dir outright.
-        return checkout(level, None);
+        return checkout(level);
     }
     let Some(common) = read_pointer(&commondir).and_then(|target| follow(&gitdir, &target)) else {
         return Level::Broken;
     };
     match common.file_name() {
         Some(own) if own == ".git" => match common.parent() {
-            Some(main) => checkout(main, None),
+            Some(main) => checkout(main),
             None => Level::Broken,
         },
         // A bare repo has no main checkout; this worktree stands in for it.
-        _ => checkout(level, Some(bare_name(&common))),
+        _ => checkout(level),
     }
 }
 
@@ -174,15 +168,6 @@ fn follow(base: &Path, target: &str) -> Option<PathBuf> {
         .filter(|path| path.is_dir())
 }
 
-fn bare_name(common: &Path) -> String {
-    let own = basename(common);
-    // `foo/.bare` is a convention for keeping worktrees beside a bare repo.
-    if own == ".bare" {
-        return common.parent().map(basename).unwrap_or_default();
-    }
-    own.strip_suffix(".git").unwrap_or(&own).to_string()
-}
-
 fn jj_workspace(level: &Path, pointer: &Path) -> Level {
     let repo = read_pointer(pointer).and_then(|target| follow(&level.join(".jj"), &target));
     match repo
@@ -190,15 +175,9 @@ fn jj_workspace(level: &Path, pointer: &Path) -> Level {
         .and_then(Path::parent)
         .and_then(Path::parent)
     {
-        Some(main) => checkout(main, None),
+        Some(main) => checkout(main),
         None => Level::Broken,
     }
-}
-
-fn basename(p: &Path) -> String {
-    p.file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -222,10 +201,9 @@ mod tests {
         fs::write(p, contents).unwrap();
     }
 
-    fn repo(root: &Path, name: &str) -> Option<Repo> {
+    fn repo(root: &Path) -> Option<Repo> {
         Some(Repo {
             root: root.canonicalize().unwrap(),
-            name: name.into(),
         })
     }
 
@@ -242,8 +220,8 @@ mod tests {
         let proj = root.path().join("proj");
         mkdir(&proj.join(".git"));
         mkdir(&proj.join("src/deep"));
-        assert_eq!(locate(&proj), repo(&proj, "proj"));
-        assert_eq!(locate(&proj.join("src/deep")), repo(&proj, "proj"));
+        assert_eq!(locate(&proj), repo(&proj));
+        assert_eq!(locate(&proj.join("src/deep")), repo(&proj));
     }
 
     #[test]
@@ -252,7 +230,7 @@ mod tests {
         let proj = root.path().join("proj");
         mkdir(&proj.join(".jj/repo"));
         mkdir(&proj.join("src"));
-        assert_eq!(locate(&proj.join("src")), repo(&proj, "proj"));
+        assert_eq!(locate(&proj.join("src")), repo(&proj));
     }
 
     #[test]
@@ -261,7 +239,7 @@ mod tests {
         let proj = root.path().join("proj");
         mkdir(&proj.join(".jj/repo"));
         mkdir(&proj.join(".git"));
-        assert_eq!(locate(&proj), repo(&proj, "proj"));
+        assert_eq!(locate(&proj), repo(&proj));
     }
 
     #[test]
@@ -270,7 +248,7 @@ mod tests {
         let proj = root.path().join("proj");
         mkdir(&proj.join(".git"));
         mkdir(&proj.join("sub/.jj"));
-        assert_eq!(locate(&proj.join("sub")), repo(&proj, "proj"));
+        assert_eq!(locate(&proj.join("sub")), repo(&proj));
     }
 
     #[test]
@@ -278,10 +256,7 @@ mod tests {
         let root = tmp();
         let proj = root.path().join("proj");
         mkdir(&proj.join(".git"));
-        assert_eq!(
-            locate(&proj.join(".workspaces/gone/src")),
-            repo(&proj, "proj")
-        );
+        assert_eq!(locate(&proj.join(".workspaces/gone/src")), repo(&proj));
     }
 
     #[test]
@@ -301,14 +276,6 @@ mod tests {
     }
 
     #[test]
-    fn leading_dots_are_kept() {
-        let root = tmp();
-        let dotfiles = root.path().join(".dotfiles");
-        mkdir(&dotfiles.join(".git"));
-        assert_eq!(locate(&dotfiles), repo(&dotfiles, ".dotfiles"));
-    }
-
-    #[test]
     fn worktree_resolves_to_main() {
         let root = tmp();
         let main = root.path().join("main");
@@ -316,8 +283,8 @@ mod tests {
         mkdir(&main.join(".git"));
         link_worktree(&main.join(".git"), &wt);
         mkdir(&wt.join("src/deep"));
-        assert_eq!(locate(&wt), repo(&main, "main"));
-        assert_eq!(locate(&wt.join("src/deep")), repo(&main, "main"));
+        assert_eq!(locate(&wt), repo(&main));
+        assert_eq!(locate(&wt.join("src/deep")), repo(&main));
     }
 
     #[test]
@@ -328,7 +295,7 @@ mod tests {
         mkdir(&main.join(".git"));
         link_worktree(&main.join(".git"), &wt);
         write(&wt.join(".git"), "gitdir: ../main/.git/worktrees/wt\n");
-        assert_eq!(locate(&wt), repo(&main, "main"));
+        assert_eq!(locate(&wt), repo(&main));
     }
 
     #[test]
@@ -344,7 +311,7 @@ mod tests {
             &format!("gitdir: {}  \r\n", admin.display()),
         );
         write(&admin.join("commondir"), "../..\r\n");
-        assert_eq!(locate(&wt), repo(&main, "main"));
+        assert_eq!(locate(&wt), repo(&main));
     }
 
     #[test]
@@ -353,29 +320,7 @@ mod tests {
         let bare = root.path().join("krew-index");
         mkdir(&bare.join("objects"));
         link_worktree(&bare, &bare.join("main"));
-        assert_eq!(
-            locate(&bare.join("main")),
-            repo(&bare.join("main"), "krew-index")
-        );
-    }
-
-    #[test]
-    fn bare_common_dir_drops_git_suffix() {
-        let root = tmp();
-        let bare = root.path().join("foo.git");
-        let wt = root.path().join("foo-wt");
-        mkdir(&bare);
-        link_worktree(&bare, &wt);
-        assert_eq!(locate(&wt), repo(&wt, "foo"));
-    }
-
-    #[test]
-    fn hidden_bare_common_dir_defers_to_its_parent() {
-        let root = tmp();
-        let foo = root.path().join("foo");
-        mkdir(&foo.join(".bare"));
-        link_worktree(&foo.join(".bare"), &foo.join("main"));
-        assert_eq!(locate(&foo.join("main")), repo(&foo.join("main"), "foo"));
+        assert_eq!(locate(&bare.join("main")), repo(&bare.join("main")));
     }
 
     #[test]
@@ -389,7 +334,7 @@ mod tests {
         );
         let sub = sup.join("themes/sub");
         mkdir(&sub.join("layouts"));
-        assert_eq!(locate(&sub.join("layouts")), repo(&sub, "sub"));
+        assert_eq!(locate(&sub.join("layouts")), repo(&sub));
     }
 
     #[test]
@@ -401,8 +346,8 @@ mod tests {
         // jj 0.44 writes the pointer relative to the workspace's `.jj`.
         write(&ws.join(".jj/repo"), "../../main/.jj/repo");
         mkdir(&ws.join("src"));
-        assert_eq!(locate(&ws), repo(&main, "main"));
-        assert_eq!(locate(&ws.join("src")), repo(&main, "main"));
+        assert_eq!(locate(&ws), repo(&main));
+        assert_eq!(locate(&ws.join("src")), repo(&main));
     }
 
     #[test]
@@ -412,7 +357,7 @@ mod tests {
         let ws = main.join(".workspaces/ws");
         mkdir(&main.join(".jj/repo"));
         write(&ws.join(".jj/repo"), "../../../.jj/repo");
-        assert_eq!(locate(&ws), repo(&main, "main"));
+        assert_eq!(locate(&ws), repo(&main));
     }
 
     #[test]
@@ -425,7 +370,7 @@ mod tests {
             &ws.join(".jj/repo"),
             &main.join(".jj/repo").display().to_string(),
         );
-        assert_eq!(locate(&ws), repo(&main, "main"));
+        assert_eq!(locate(&ws), repo(&main));
     }
 
     #[test]
@@ -573,8 +518,8 @@ mod tests {
         }
     }
 
-    /// Answers `config get --json <key>` from `pairs` and records each run's
-    /// directory in `<dir>/pwd`.
+    /// Answers `config get --json <key>` from `pairs` and records each
+    /// run's `BEADS_DIR` in `<dir>/dirs`.
     fn config_bd(dir: &Path, pairs: &[(&str, &str)]) -> Bd {
         let mut cases = String::new();
         for (key, value) in pairs {
@@ -583,60 +528,52 @@ mod tests {
         Bd::new(fake_bd(
             dir,
             &format!(
-                r#"pwd -P >> "{log}"
+                r#"echo "$BEADS_DIR" >> "{log}"
 case "$4" in
 {cases}  *) v='' ;;
 esac
 printf '{{"key":"%s","schema_version":1,"value":"%s"}}\n' "$4" "$v""#,
-                log = dir.join("pwd").display()
+                log = dir.join("dirs").display()
             ),
         ))
     }
 
     #[test]
-    fn settings_run_in_the_main_checkout() {
+    fn settings_read_the_named_database() {
         let root = tmp();
-        let main = root.path().join("main");
-        let wt = root.path().join("wt");
-        mkdir(&main.join(".git"));
-        link_worktree(&main.join(".git"), &wt);
+        let db = root.path().join("db");
+        mkdir(&db);
         let bd = config_bd(
             root.path(),
             &[(PREFIX_KEY, "zz"), (PROJECT_KEY, "Example Project")],
         );
-        let found = locate(&wt).unwrap();
         assert_eq!(
-            settings(&bd, &found).unwrap(),
+            settings(&bd, &db).unwrap(),
             Settings {
                 prefix: "zz".into(),
                 project: Some("Example Project".into()),
             }
         );
-        let pwds = fs::read_to_string(root.path().join("pwd")).unwrap();
-        let main = main.canonicalize().unwrap();
-        assert_eq!(pwds.lines().count(), 2);
-        for pwd in pwds.lines() {
-            assert_eq!(Path::new(pwd), main);
+        let dirs = fs::read_to_string(root.path().join("dirs")).unwrap();
+        assert_eq!(dirs.lines().count(), 2);
+        for dir in dirs.lines() {
+            assert_eq!(Path::new(dir), db);
         }
     }
 
     #[test]
     fn settings_without_override() {
         let root = tmp();
-        let proj = root.path().join("proj");
-        mkdir(&proj.join(".git"));
         let bd = config_bd(root.path(), &[(PREFIX_KEY, "zz")]);
-        let got = settings(&bd, &locate(&proj).unwrap()).unwrap();
+        let got = settings(&bd, root.path()).unwrap();
         assert_eq!(got.project, None);
     }
 
     #[test]
     fn missing_prefix_is_an_error() {
         let root = tmp();
-        let proj = root.path().join("proj");
-        mkdir(&proj.join(".git"));
         let bd = config_bd(root.path(), &[(PROJECT_KEY, "x")]);
-        let err = settings(&bd, &locate(&proj).unwrap()).unwrap_err();
+        let err = settings(&bd, root.path()).unwrap_err();
         assert!(matches!(err, SettingsError::NoPrefix), "{err:?}");
         assert!(err.to_string().contains("issue_prefix"), "{err}");
     }
@@ -644,10 +581,8 @@ printf '{{"key":"%s","schema_version":1,"value":"%s"}}\n' "$4" "$v""#,
     #[test]
     fn bd_failure_is_an_error() {
         let root = tmp();
-        let proj = root.path().join("proj");
-        mkdir(&proj.join(".git"));
         let bd = Bd::new(fake_bd(root.path(), "echo 'no database' >&2; exit 1"));
-        let err = settings(&bd, &locate(&proj).unwrap()).unwrap_err();
+        let err = settings(&bd, root.path()).unwrap_err();
         assert!(
             matches!(err, SettingsError::Bd(BdError::Failed { .. })),
             "{err:?}"
