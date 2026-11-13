@@ -259,7 +259,7 @@ impl Config {
             .unfiled
             .unwrap_or_else(|| PathBuf::from(DEFAULT_UNFILED));
         check_unfiled(&unfiled).map_err(|r| invalid("unfiled", r))?;
-        let vault = raw.vault.map(&resolve).transpose()?;
+        let vault = raw.vault.map(resolve).transpose()?;
         let mut repos = Vec::with_capacity(raw.repos.len());
         for (i, entry) in raw.repos.into_iter().enumerate() {
             repos.push(match entry {
