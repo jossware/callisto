@@ -1022,6 +1022,32 @@ fn missing_project_is_unfiled() {
 }
 
 #[test]
+fn dot_prefixed_split_project_is_unfiled() {
+    let f = split();
+    fs::create_dir_all(f.vault.join("Projects/.x")).unwrap();
+    f.set_export(&[field_line(
+        "zz-1",
+        "one",
+        "open",
+        Some(r#"{"repo":"o/.x"}"#),
+    )]);
+    let report = f.run_split(&[]).unwrap();
+    assert!(!f.vault.join("Projects/.x/one - zz-1.md").exists());
+    assert_eq!(report.created, paths(&[INDEX]));
+    assert_eq!(
+        report.unfiled[0].reason,
+        Reason::MissingProject(".x".into())
+    );
+    assert_eq!(
+        report.conditions,
+        [Condition::MissingProject {
+            project: ".x".into(),
+            ids: vec!["zz-1".into()]
+        }]
+    );
+}
+
+#[test]
 fn unfiled_existing_note_is_left_alone() {
     let f = split();
     f.set_export(&[field_line("zz-1", "one", "open", REPO_A)]);

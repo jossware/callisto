@@ -71,8 +71,10 @@ pub fn map(
 }
 
 pub fn find(vault: &Path, locations: &[PathBuf], name: &str) -> Option<Project> {
-    // An override is free text and must not reach outside the locations.
-    if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\\']) {
+    // The vault scan skips dot-prefixed entries, so notes filed there would
+    // vanish. An override is free text and must not reach outside the
+    // locations.
+    if name.is_empty() || name.starts_with('.') || name.contains(['/', '\\']) {
         return None;
     }
     locations.iter().find_map(|loc| {
@@ -258,6 +260,38 @@ mod tests {
         for name in ["", ".", "..", "a/b", "../Areas/x", "a\\b"] {
             assert_eq!(find(v, &defaults(), name), None, "{name:?}");
         }
+    }
+
+    #[test]
+    fn dot_prefixed_names_match_nothing() {
+        let vault = tempfile::tempdir().unwrap();
+        let v = vault.path();
+        dir(v, "Projects", ".dotfiles");
+        dir(v, "Areas", ".x");
+        for name in [".dotfiles", ".x"] {
+            assert_eq!(find(v, &defaults(), name), None, "{name:?}");
+        }
+    }
+
+    #[test]
+    fn inner_dot_name_is_found() {
+        let vault = tempfile::tempdir().unwrap();
+        let rel = dir(vault.path(), "Projects", "a.b");
+        assert_eq!(find(vault.path(), &defaults(), "a.b"), project("a.b", rel));
+    }
+
+    #[test]
+    fn dot_prefixed_default_is_unmapped() {
+        let vault = tempfile::tempdir().unwrap();
+        dir(vault.path(), "Areas", ".dotfiles");
+        let err = map(vault.path(), &defaults(), ".dotfiles", &settings(None)).unwrap_err();
+        assert_eq!(
+            err,
+            Unmapped {
+                name: ".dotfiles".into(),
+                source: Source::Default,
+            }
+        );
     }
 
     #[test]
