@@ -17,7 +17,8 @@ The vault is a read-only mirror. Beads is the only source of truth.
 - A note outlives its bead. When a bead disappears from beads, its note
   is kept, marked `beadRemoved: true`, and set to `dropped` unless it
   was already `done` or `dropped`. Each note records its bead's prefix
-  in `beadPrefix`, and only a sync of a repo with that prefix marks it.
+  in `beadPrefix`, and only a sync of a database with that prefix
+  marks it.
   After a prefix rename, old notes are no longer marked; delete or mark
   them by hand.
 
@@ -71,6 +72,9 @@ $XDG_CONFIG_HOME/callisto/config.toml
 ~/.config/callisto/config.toml    # when XDG_CONFIG_HOME is unset
 ```
 
+It lists beads databases, each named by its directory. Where each
+repo has a database of its own:
+
 ```toml
 vault = "~/org"
 
@@ -78,221 +82,208 @@ vault = "~/org"
 beads_dir = "~/Workspaces/callisto/.beads"
 
 [[databases]]
-beads_dir = "~/Workspaces/ganymede/.beads"
+beads_dir = "~/.dotfiles/.beads"
+project = "dotfiles"
 ```
 
-| Key | |
-|---|---|
-| `vault` | Vault root. Required here or by `--vault`, which overrides it. |
-| `repos` | Repo checkouts that `sync --all` syncs. Each is a path or a table entry. Every command also uses the list to tell which repo owns a bead id in an export, or in a note without `beadPrefix`. |
-| `field` | The field table entries match, unless an entry sets its own. No default. |
-| `unfiled` | Vault folder for the index of unclaimed beads. Default `Inbox`. |
-
-- `vault` and every repo path MUST be absolute or start with `~/`. The
-  scheduled job runs in no particular directory, so relative entries
-  are rejected.
-- `unfiled` MUST be relative to the vault, with no empty, `.` or `..`
-  segment.
-- Unknown keys are an error, inside a table entry too, so a typo cannot
-  empty the list.
-- An absent file is an empty list. `sync <path>` and the hook still
-  work, with a warning that the repo's prefix is unchecked.
-  `sync --all` fails.
-
-### Table entries
-
-A path entry claims every bead in its repo's database. That fits a
-repo with a database of its own. When several repos share one
-database, and so one prefix, each bead can name its repo in a field.
-A table entry claims beads by that field:
+Where many repos share one database, each bead names its repo in a
+field, and `split` files it by that field:
 
 ```toml
 vault = "~/org"
 unfiled = "Inbox/Beads"
 
 [[databases]]
-beads_dir = "~/Workspaces/callisto/.beads"
-
-[[databases]]
-beads_dir = "~/work/tasksdb/.beads"
+beads_dir = "~/tasksdb/.beads"
 split.by = "metadata.repo"
 split.projects = { "github.com/example/api" = "API" }
 ```
 
-Here callisto has a database of its own. The three work repos share
-another.
+The shared database needs no clone of any repo.
 
 | Key | |
 |---|---|
-| `path` | Repo checkout. Required. |
-| `value` | A string, or a list of strings. Default: the checkout's `origin` remote as `host/path`. |
-| `field` | Dotted path to the field to match. Overrides the top-level `field`. One of the two MUST be set. |
-| `project` | Vault project. Default: the name of the repo's main checkout directory. |
+| `vault` | Vault root. Required here or by `--vault`, which overrides it. |
+| `unfiled` | Vault folder for the index of unfiled beads. Default `Inbox`. |
+| `databases` | The databases `sync --all` syncs, in order. |
 
-A table entry claims a bead when the bead carries the database's prefix
-AND its `field` equals one of the entry's values:
+Each `[[databases]]` entry:
 
-- `field` is any dotted path into the bead as `bd export` emits it,
-  such as `metadata.repo`. Segments MUST NOT be empty.
-- Only a string value matches. An absent field, a number, a list, an
-  object or `null` never does.
-- Values are compared exactly. The bead's value is not normalised.
-- A list claims a repo under several names, such as its old and new
-  names after a rename.
+| Key | |
+|---|---|
+| `beads_dir` | The database directory. Required. |
+| `project` | Every bead in the database goes to this project. |
+| `split.by` | Dotted path into the bead as `bd export` emits it, such as `metadata.repo`. Required when `split` is set. |
+| `split.projects` | Field value to project name. Optional. |
 
-When `value` is unset, callisto runs `git remote get-url origin` in the
-checkout and normalises the URL to `host/path`. SSH and HTTPS forms
-and a trailing `.git` normalise alike. The host is lowercased, any user
-and port are dropped, and every path segment is kept. So
-`git@github.com:example/api.git` and
-`https://github.com/example/api` both give `github.com/example/api`.
+- `vault` and every `beads_dir` MUST be absolute or start with `~/`.
+  The scheduled job runs in no particular directory, so relative
+  entries are rejected.
+- An entry MUST NOT set both `project` and `split`.
+- Two entries MUST NOT name the same directory, after symlinks are
+  resolved.
+- `split.by` segments MUST NOT be empty.
+- `unfiled` MUST be relative to the vault, with no empty, `.` or `..`
+  segment.
+- Unknown keys are an error, inside an entry and inside `split` too,
+  so a typo cannot empty the list.
+- A `beads_dir` that does not exist does not fail loading. It fails
+  that database's sync; other databases still sync.
+- An absent file is an empty list. `sync <path>` and the hook still
+  work for a checkout with its own `.beads/`. `sync --all` fails.
 
-- An SSH host alias is taken literally: `work:example/api` gives
-  `work/example/api`. Such a repo MUST set `value`.
-- A jj checkout without a colocated git repo has no `origin`. It MUST
-  set `value`.
-- `git` MUST be on `PATH` wherever callisto runs, when any table entry
-  omits `value`.
-
-callisto resolves the default on each sync, not when it loads the
-config. An entry it cannot resolve does not stop other repos syncing;
-see [Unclaimed beads](#unclaimed-beads).
+Every `bd` call for a database runs in its directory, with
+`BEADS_DIR` set to it and `BEADS_DB` removed. A `BEADS_DIR` or
+`BEADS_DB` in your environment never changes what a configured
+database reads.
 
 ### Projects
 
-Each path entry maps to a project or area in the vault:
+A database with no `split` files every bead under one project:
 
-1. The repo's `custom.obsidian.project` setting, if set:
+1. its `project`, if set;
+2. else its `custom.obsidian.project` bd setting:
 
    ```sh
    bd config set custom.obsidian.project "Example Project"
    ```
 
-2. Otherwise, the name of the repo's main checkout directory.
+3. else the name of the directory that holds `beads_dir`. So
+   `~/.dotfiles/.beads` defaults to `.dotfiles`.
 
-The project's home note is looked up at `Projects/<Name>/<Name>.md`,
+A split database files each bead by the value at `split.by`:
+
+1. the value's entry in `split.projects`;
+2. else the value's last `/`-separated segment, ignoring a trailing
+   `/`. So `github.com/example/web` files under `web`.
+
+Only a string value names a project. A missing field, a number, a
+list, an object or `null` sends the bead to the
+[unfiled index](#unfiled-beads). Values are compared exactly.
+`custom.obsidian.project` is not consulted: repos that share a
+database share its settings.
+
+A project's home note is looked up at `Projects/<Name>/<Name>.md`,
 `Areas/<Name>/<Name>.md`, `Archives/Projects/<Name>/<Name>.md`, then
 `Archives/Areas/<Name>/<Name>.md`. New notes go in that folder, named
-`<title> - <bead-id>.md`. A repo with no project is skipped with a
-warning. callisto never creates a project.
+`<title> - <bead-id>.md`. callisto never creates a project.
 
-A table entry's project is its `project`, else the name of its main
-checkout directory. `custom.obsidian.project` is not consulted: it is
-stored in the database, so repos that share one share it. A table
-entry whose project is not in the vault does not skip its repo. Its
-beads are listed as unclaimed.
+- A single-project database whose project is not in the vault is
+  skipped with a warning. A set `project` or `custom.obsidian.project`
+  is final; callisto does not fall back to the directory name.
+- In a split database, a bead whose project is not in the vault is
+  unfiled, with the missing name as its reason.
 
 A note is found by its bead id wherever it lies in the vault, and
-updated there. callisto never moves a note.
+updated there. callisto never moves a note. A bead whose project
+changes keeps its note where it is; only its `projects:` link changes.
 
-### Shared databases
+### Finding a directory's database
 
-Repos whose `.beads/` redirect to one database share its beads and its
-prefix. callisto groups the configured repos by the database
-`bd context` reports; you never list groups. A repo with a database of
-its own is a group of one.
+`sync <path>`, plain `sync` and the hook each start from a directory.
+callisto finds its checkout. A worktree or jj workspace resolves to its
+main checkout. It then runs `bd context --json` in the main checkout,
+with your environment minus `BEADS_DB`, and uses the configured
+database whose `beads_dir` matches the one reported. So a checkout with
+no `.beads/` of its own reaches the database `$BEADS_DIR` names.
 
-- A sync of any repo in a group exports the database once and files
-  the beads of every repo in the group.
-- `sync --all` pulls and syncs each group once.
-- A group MUST NOT mix path entries and table entries.
-- Table entries in a group MUST use the same `field`.
-- Two table entries in a group MUST NOT share a value or name the same
-  checkout.
+A directory in no checkout has no database: `sync` fails it as
+`not in a repository`, and the hook does nothing. `$BEADS_DIR` alone
+is never enough.
 
-A group that breaks a rule is neither pulled nor synced, and `sync`
-exits non-zero. Other groups still sync.
+A database that is not configured:
 
-A checkout not in `repos` whose database a group uses syncs as that
-group. One whose database no group uses syncs alone, as a path entry
-would, with a warning that its prefix is unchecked. While any table
-entry is unresolvable, such a checkout syncs nothing, since its
-database may be that entry's.
+- If it is the checkout's own `.beads/`, it syncs as a single-project
+  database with defaults, with a warning that its prefix is unchecked
+  against the configured databases.
+- Otherwise it came from `$BEADS_DIR`, and has no meaningful name.
+  `sync` reports `database <dir> is not configured` and exits
+  non-zero. The hook skips it without logging.
 
-### Unclaimed beads
+### Prefixes and removal marking
 
-In a group of table entries, a bead is unclaimed when no entry claims
-it, or when its entry's project is not in the vault.
+Each sync exports the whole database. A note is marked removed when
+its bead carries the database's prefix and is absent from the export.
+callisto reads the prefix of every configured database on every run, to
+tell which database owns a note.
 
-- An unclaimed bead gets no note. A note it already has is left as it
-  is. It is not marked removed, since the bead is still in beads.
-- Once an entry claims it, the next sync creates its note.
+- Two configured databases with the same prefix are a standing
+  condition. Neither marks notes removed while it lasts. Both still
+  create and update notes.
+- While any configured database cannot be read (its directory is
+  missing, or its prefix cannot be read), no sync marks notes removed.
 
-Each such group has one index note:
+### Unfiled beads
+
+In a split database, a bead is unfiled when its value names no
+project, or names one that is not in the vault.
+
+- An unfiled bead gets no note. A note it already has is left as it is.
+  It is not marked removed, since the bead is still in beads.
+- Once it can be filed, the next sync creates its note.
+
+Each split database has one index note:
 
 ```
 <unfiled>/Unfiled beads - <prefix>.md
 ```
 
-It lists each unclaimed bead that would otherwise get a note: id,
-title, status and reason. Closed beads come after the rest. The reason
-is that the field is absent, the value found (JSON for a value that is
+It lists each unfiled bead that would otherwise get a note: id, title,
+status and reason. Closed beads come after the rest. The reason is
+that the field is absent, the value found (JSON for a value that is
 not a string), or the missing project's name. callisto updates the
-index on every sync, to an empty list when nothing is unclaimed. It
+index on every sync, to an empty list when nothing is unfiled. It
 never deletes it. Like a bead's note, the index carries
 `generatedBy: callisto`, and hand edits are lost.
 
 callisto never creates the unfiled folder. If the folder is missing, or
 the index path holds a file callisto did not write, no index is
-written. A group of path entries has no unclaimed beads and no index.
-
-A table entry is unresolvable when callisto cannot place it in a group
-or resolve it: its checkout is missing, `bd context` fails, the
-database's prefix cannot be read, or a defaulted `value` has no usable
-`origin`. While any table entry is unresolvable, every group of table
-entries:
-
-- still creates and updates notes for beads a resolved entry claims;
-- does not rewrite its index, since a bead that looks unclaimed may be
-  the unresolvable entry's;
-- does not mark notes removed.
+written. A single-project database has no index.
 
 Each of these is a standing condition, logged as described in
-[Errors](#errors). `sync` exits non-zero for an unresolvable entry, a
-broken group rule, a missing unfiled folder, an index path callisto did
-not write, or an unlisted checkout it skipped. Unclaimed beads and a
-missing project alone do not fail it.
+[Errors](#errors): unfiled beads, a missing project, a missing unfiled
+folder, an index path callisto did not write, a shared prefix, and a
+database that cannot be read. `sync` exits non-zero for all but
+unfiled beads and a missing project.
 
 ## Commands
 
 The global flag `--vault <dir>` overrides the config file's vault.
 
-### `callisto sync [<repo>...]`
+### `callisto sync [<path>...]`
 
-Syncs the given repo checkouts, by default the current directory's
-repo. A worktree or jj workspace resolves to its main checkout. Prints
-one line per repo:
+Syncs the database of each given directory, by default the current
+directory's. See [Finding a directory's database](#finding-a-directorys-database).
+Paths that resolve to one database sync it once. Prints one line per
+database, named after the directory that holds its `beads_dir`:
 
 ```
 ganymede: 2 created, 5 updated, 0 removed, 40 unchanged
 ```
 
 Warnings and standing conditions go to stderr. Exits non-zero if any
-repo failed, or on a condition listed under
-[Unclaimed beads](#unclaimed-beads).
+database failed, or on a condition listed under
+[Unfiled beads](#unfiled-beads).
 
 ### `callisto sync --all`
 
-Runs `bd dolt pull` once per beads database the configured repos use,
-then syncs them. Repos that share a database sync together, once,
-under the first such repo listed that exists. A database whose pull
-fails is logged and skipped; the others still sync. This is what the
+Runs `bd dolt pull` once per configured database, then syncs each, in
+config order. A database whose directory is missing, whose pull fails,
+or whose prefix cannot be read is logged and skipped; the others still
+sync. With no databases configured, it fails. This is what the
 scheduled job runs.
-
-`callisto sync` and the hook treat a shared database the same way: a
-repo in a group syncs the whole group. See
-[Shared databases](#shared-databases).
 
 ### `callisto hook`
 
 A Claude Code and Codex `Stop` hook. It reads the hook payload on stdin
-and syncs the repo its `cwd` is in, with that repo's group, so notes
-catch up as soon as an agent finishes a turn. It does not pull.
+and syncs the database of the directory its `cwd` is in, so notes catch
+up as soon as an agent finishes a turn. It does not pull.
 
 The hook always exits 0, and its stdout is always empty. It does
-nothing when the directory has no `.beads/`, when no vault is set,
-when the vault directory is absent, or when another sync holds the
-lock. Failures go to the error log only.
+nothing when the directory's checkout has no `.beads/` and `BEADS_DIR`
+is unset, when its database is not configured and not the checkout's
+own, when no vault is set, when the vault directory is absent, or when
+another sync holds the lock. Failures go to the error log only.
 
 ## Hook setup
 
@@ -377,14 +368,16 @@ log every run.
   services.callisto = {
     enable = true;
     vault = "~/org";
-    field = "metadata.repo";
-    repos = [
-      "~/Workspaces/callisto"
-      "~/Workspaces/ganymede"
+    databases = [
+      { beads_dir = "~/Workspaces/callisto/.beads"; }
       {
-        path = "~/work/api";
-        value = "github.com/example/api";
-        project = "API";
+        beads_dir = "~/.dotfiles/.beads";
+        project = "dotfiles";
+      }
+      {
+        beads_dir = "~/work/tasksdb/.beads";
+        split.by = "metadata.repo";
+        split.projects."github.com/example/api" = "API";
       }
     ];
   };
@@ -396,23 +389,27 @@ log every run.
 | `services.callisto.enable` | `false` | Install callisto and schedule `sync --all`. |
 | `services.callisto.package` | this flake's | The package to install and run. |
 | `services.callisto.vault` | `null` | Written to `config.toml`. |
-| `services.callisto.repos` | `[ ]` | Written to `config.toml`. Each is a path or a table entry with `path`, `value`, `field` and `project`. Each path MUST be absolute or start with `~/`. |
-| `services.callisto.field` | `null` | Written to `config.toml`. |
+| `services.callisto.databases` | `[ ]` | Written to `config.toml`. Each entry has `beads_dir`, and optionally `project` or `split` (`by`, `projects`). Each `beads_dir` MUST be absolute or start with `~/`. |
 | `services.callisto.unfiled` | `null` | Written to `config.toml`. Unset, callisto uses `Inbox`. |
 | `services.callisto.path` | profile `bin`, then system dirs | `PATH` for the job. |
 | `services.callisto.startInterval` | `900` | Seconds between launchd runs (macOS). |
 | `services.callisto.onCalendar` | `"*:0/15"` | systemd timer schedule (Linux). |
 
-Set `repos` through the module. Once `vault` or `repos` is set,
-home-manager owns `config.toml`. `sync --all` fails without repos or
-a vault, so every switch warns while `repos` is empty or `vault` is
-unset. `field` and `unfiled` alone do not make home-manager own the
-file; a switch warns that they have no effect.
+Set `databases` through the module. Once `vault` or `databases` is
+set, home-manager owns `config.toml`. `sync --all` fails without
+databases or a vault, so every switch warns while `databases` is empty
+or `vault` is unset. `unfiled` alone does not make home-manager own
+the file; a switch warns that it has no effect.
 
-A hand-written `config.toml` is discouraged. With `vault` and `repos`
-both unset, the module leaves the file alone and the job reads it, but
-every switch warns unless the module sets `vault` and `repos` or the
-file comes from `xdg.configFile."callisto/config.toml"`.
+The module checks what it can before a switch: every `beads_dir` is
+anchored, no entry sets both `project` and `split`, and `split.by` has
+no empty segment.
+
+A hand-written `config.toml` is discouraged. With `vault` and
+`databases` both unset, the module leaves the file alone and the job
+reads it, but every switch warns unless the module sets `vault` and
+`databases` or the file comes from
+`xdg.configFile."callisto/config.toml"`.
 
 What each platform gets:
 
@@ -458,10 +455,6 @@ Things to know:
   default profile), then the system dirs. Anything elsewhere, such as
   `~/.nix-profile/bin` under the NixOS or nix-darwin module with
   `home-manager.useUserPackages`, needs `services.callisto.path`.
-- When a table entry omits `value`, the job's `PATH` MUST also reach
-  `git`, which callisto runs to read the checkout's `origin`. The
-  default `path` reaches it only if your profile or system provides
-  it.
 - The job runs with home-manager's `xdg.configHome` and
   `xdg.stateHome`, so it shares the hook's config, lock and error log.
   Your shell MUST export the same `XDG_CONFIG_HOME` and
@@ -496,7 +489,7 @@ $XDG_STATE_HOME/callisto/errors.jsonl
 ```
 
 ```json
-{"ts":"…","version":"…","command":"sync","repo":"/Users/me/Workspaces/a","stage":"pull","error":"…"}
+{"ts":"…","version":"…","command":"sync","repo":"/Users/me/Workspaces/a/.beads","stage":"pull","error":"…"}
 ```
 
 `stage` is one of `config`, `payload`, `lock`, `pull`, `export`,
@@ -504,11 +497,11 @@ $XDG_STATE_HOME/callisto/errors.jsonl
 `0600`, since entries carry paths and `bd` output. It is kept under
 1 MiB by dropping its older half.
 
-Standing conditions are problems that persist across runs: unclaimed
+Standing conditions are problems that persist across runs: unfiled
 beads, a missing project, a missing unfiled folder, an index path
-callisto did not write, an unresolvable entry, a broken group rule, an
-unlisted checkout skipped. `sync` prints them on every run. The log
-gets them once when they appear or change, and once when they clear.
+callisto did not write, a shared prefix, a database that cannot be
+read. `sync` prints them on every run. The log gets them once when
+they appear or change, and once when they clear.
 `conditions.json` beside the log keeps the last logged summary per
 subject, `0600`. Deleting it only re-logs current conditions.
 

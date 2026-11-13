@@ -57,14 +57,14 @@ let
         hmConfig {
           inherit system settings extra;
         };
-      # A vault and a repo keep the warnings out of every other test.
+      # A vault and a database keep the warnings out of every other test.
       enabled =
         settings:
         with' (
           {
             enable = true;
             vault = "~/org";
-            repos = [ "/srv/b" ];
+            databases = [ { beads_dir = "/srv/b/.beads"; } ];
           }
           // settings
         ) { };
@@ -75,7 +75,7 @@ let
         with'
           {
             enable = true;
-            repos = [ "/srv/b" ];
+            databases = [ { beads_dir = "/srv/b/.beads"; } ];
           }
           {
             xdg.configHome = "/c";
@@ -160,9 +160,9 @@ let
           let
             configured = enabled {
               vault = "~/org";
-              repos = [
-                "~/Workspaces/a"
-                "/srv/b"
+              databases = [
+                { beads_dir = "~/Workspaces/a/.beads"; }
+                { beads_dir = "/srv/b/.beads"; }
               ];
             };
           in
@@ -177,12 +177,12 @@ let
             };
           };
 
-        test_warns_without_repos = {
+        test_warns_without_databases = {
           expr = map (cfg: builtins.length (warned cfg)) [
             bare
             (enabled {
               vault = "~/org";
-              repos = [ ];
+              databases = [ ];
             })
           ];
           expected = [
@@ -195,17 +195,20 @@ let
           expr = map (cfg: builtins.length (warned cfg)) [
             (with' {
               enable = true;
-              repos = [ "/srv/b" ];
+              databases = [ { beads_dir = "/srv/b/.beads"; } ];
             } { })
           ];
           expected = [ 1 ];
         };
 
-        test_no_warning_when_repos_reach_the_job = {
+        test_no_warning_when_databases_reach_the_job = {
           expr = map (cfg: warned cfg) [
             on
             (with' { enable = true; } {
-              xdg.configFile."callisto/config.toml".text = ''repos = ["/srv/b"]'';
+              xdg.configFile."callisto/config.toml".text = ''
+                [[databases]]
+                beads_dir = "/srv/b/.beads"
+              '';
             })
             off
           ];
@@ -216,9 +219,28 @@ let
           ];
         };
 
-        test_relative_repo_fails_assertion = {
-          expr = rejected { repos = [ "Workspaces/a" ]; };
-          expected = true;
+        test_relative_beads_dir_rejected = {
+          expr = map rejected [
+            { databases = [ { beads_dir = "Workspaces/a/.beads"; } ]; }
+            { databases = [ { beads_dir = "~user/.beads"; } ]; }
+            { databases = [ { beads_dir = "~/a/.beads"; } ]; }
+          ];
+          expected = [
+            true
+            true
+            false
+          ];
+        };
+
+        test_old_options_removed = {
+          expr = map rejected [
+            { repos = [ "/srv/b" ]; }
+            { field = "metadata.repo"; }
+          ];
+          expected = [
+            true
+            true
+          ];
         };
 
         test_relative_vault_fails_assertion = {
@@ -226,25 +248,24 @@ let
           expected = true;
         };
 
-        test_table_entries_accepted =
+        test_databases_accepted =
           let
             configured = enabled {
-              field = "metadata.repo";
               unfiled = "Inbox/Beads";
-              repos = [
-                "/srv/b"
+              databases = [
+                { beads_dir = "/srv/b/.beads"; }
                 {
-                  path = "~/work/p";
-                  value = "github.com/o/p";
-                  project = "P";
+                  beads_dir = "~/.dotfiles/.beads";
+                  project = "dotfiles";
                 }
                 {
-                  path = "/srv/q";
-                  field = "x.y";
-                  value = [
-                    "a"
-                    "b"
-                  ];
+                  beads_dir = "~/work/tasksdb/.beads";
+                  split.by = "metadata.repo";
+                  split.projects."github.com/o/api" = "API";
+                }
+                {
+                  beads_dir = "/srv/q/.beads";
+                  split.by = "x";
                 }
               ];
             };
@@ -260,52 +281,38 @@ let
             };
           };
 
-        test_relative_table_path_fails_assertion = {
+        test_project_and_split_rejected = {
           expr = rejected {
-            field = "f";
-            repos = [ { path = "work/p"; } ];
+            databases = [
+              {
+                beads_dir = "/srv/p/.beads";
+                project = "P";
+                split.by = "metadata.repo";
+              }
+            ];
           };
           expected = true;
         };
 
-        test_table_without_field_fails_assertion = {
-          expr = [
-            (rejected { repos = [ { path = "/srv/p"; } ]; })
-            (rejected {
-              repos = [
-                {
-                  path = "/srv/p";
-                  field = "f";
-                }
-              ];
-            })
+        test_bad_split_by_fails_assertion = {
+          expr = map (by: rejected {
+            databases = [
+              {
+                beads_dir = "/p/.beads";
+                split.by = by;
+              }
+            ];
+          }) [
+            "metadata."
+            ".repo"
+            "a..b"
+            "metadata.repo"
           ];
           expected = [
+            true
+            true
             true
             false
-          ];
-        };
-
-        test_bad_field_fails_assertion = {
-          expr = map rejected [
-            {
-              field = "metadata.";
-              repos = [ { path = "/p"; } ];
-            }
-            {
-              repos = [
-                {
-                  path = "/p";
-                  field = ".repo";
-                }
-              ];
-            }
-            { field = "a..b"; }
-          ];
-          expected = [
-            true
-            true
-            true
           ];
         };
 
@@ -334,21 +341,13 @@ let
           expected = false;
         };
 
-        test_warns_on_unused_field_or_unfiled = {
-          expr = map (settings: warned (with' ({ enable = true; } // settings) {
-            xdg.configFile."callisto/config.toml".text = "";
-          })) [
-            { field = "f"; }
-            { unfiled = "U"; }
-            { field = "f"; unfiled = "U"; }
-          ];
+        test_warns_on_unused_unfiled = {
+          expr = warned (with' {
+            enable = true;
+            unfiled = "U";
+          } { xdg.configFile."callisto/config.toml".text = ""; });
           expected = [
-            [ "services.callisto.field is set, but neither vault nor repos is, so config.toml is not generated and it has no effect." ]
-            [ "services.callisto.unfiled is set, but neither vault nor repos is, so config.toml is not generated and it has no effect." ]
-            [
-              "services.callisto.field is set, but neither vault nor repos is, so config.toml is not generated and it has no effect."
-              "services.callisto.unfiled is set, but neither vault nor repos is, so config.toml is not generated and it has no effect."
-            ]
+            "services.callisto.unfiled is set, but neither vault nor databases is, so config.toml is not generated and it has no effect."
           ];
         };
       };
@@ -469,7 +468,7 @@ let
             );
             settings = {
               enable = true;
-              repos = [ "/srv/b" ];
+              databases = [ { beads_dir = "/srv/b/.beads"; } ];
               package = self.packages.${host}.default;
             };
           };

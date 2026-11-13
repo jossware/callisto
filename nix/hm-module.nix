@@ -19,8 +19,6 @@ let
 
   nonEmpty = lib.types.strMatching ".+";
 
-  entryPath = e: if lib.isString e then e else e.path;
-
   # Mirrors the loader: every dot-separated segment is non-empty.
   fieldAssertion = option: label: f: {
     assertion = !(builtins.elem "" (lib.splitString "." f));
@@ -34,30 +32,32 @@ let
     message = "services.callisto.unfiled: ${u} MUST be a relative path inside the vault, with no empty, `.` or `..` segments";
   };
 
-  repoAssertions =
-    e:
-    let
-      p = entryPath e;
-    in
-    [ (entryAssertion "repos" p) ]
-    ++ lib.optionals (lib.isAttrs e) (
-      [
-        {
-          assertion = e.field != null || cfg.field != null;
-          message = "services.callisto.repos: ${p} MUST set field, or set services.callisto.field";
-        }
-      ]
-      ++ lib.optional (e.field != null) (fieldAssertion "repos" "${p}: field" e.field)
+  databaseAssertions =
+    d:
+    [
+      (entryAssertion "databases" d.beads_dir)
+      {
+        assertion = d.project == null || d.split == null;
+        message = "services.callisto.databases: ${d.beads_dir} MUST NOT set both project and split";
+      }
+    ]
+    ++ lib.optional (d.split != null) (
+      fieldAssertion "databases" "${d.beads_dir}: split.by" d.split.by
     );
 
-  renderRepo =
-    e:
-    if lib.isString e then
-      e
-    else
-      lib.filterAttrs (_: v: v != null) { inherit (e) path value field project; };
+  renderDatabase =
+    d:
+    lib.filterAttrs (_: v: v != null) {
+      inherit (d) beads_dir project;
+      split =
+        if d.split == null then
+          null
+        else
+          { inherit (d.split) by; }
+          // lib.optionalAttrs (d.split.projects != { }) { inherit (d.split) projects; };
+    };
 
-  generates = cfg.vault != null || cfg.repos != [ ];
+  generates = cfg.vault != null || cfg.databases != [ ];
 
   exe = "${cfg.package}/bin/callisto";
   # The hook runs with the user's XDG dirs; launchd and systemd do not
@@ -86,71 +86,68 @@ in
       example = "~/org";
       description = ''
         Vault root written to config.toml. callisto needs a vault from
-        config.toml or `--vault`. With neither this nor `repos` set,
+        config.toml or `--vault`. With neither this nor `databases` set,
         config.toml is left alone.
       '';
     };
 
-    repos = lib.mkOption {
+    databases = lib.mkOption {
       type = lib.types.listOf (
-        lib.types.either lib.types.str (
-          lib.types.submodule {
-            options = {
-              path = lib.mkOption {
-                type = lib.types.str;
-                description = "Repo checkout. MUST be absolute or start with `~/`.";
-              };
-              value = lib.mkOption {
-                type = lib.types.nullOr (lib.types.either nonEmpty (lib.types.nonEmptyListOf nonEmpty));
-                default = null;
-                description = ''
-                  Value or values matched against the field on each bead.
-                  callisto defaults it to the checkout's `origin`
-                  normalised to `host/path`.
-                '';
-              };
-              field = lib.mkOption {
-                type = lib.types.nullOr lib.types.str;
-                default = null;
-                description = ''
-                  Dotted path of the bead field to match. Overrides
-                  `services.callisto.field`. A table entry MUST have one
-                  of the two.
-                '';
-              };
-              project = lib.mkOption {
-                type = lib.types.nullOr nonEmpty;
-                default = null;
-                description = ''
-                  Project name for the repo. callisto defaults it to the
-                  checkout directory's name.
-                '';
-              };
+        lib.types.submodule {
+          options = {
+            beads_dir = lib.mkOption {
+              type = lib.types.str;
+              description = "Beads database directory. MUST be absolute or start with `~/`.";
             };
-          }
-        )
+            project = lib.mkOption {
+              type = lib.types.nullOr nonEmpty;
+              default = null;
+              description = ''
+                Project every bead in the database goes to. callisto
+                defaults it to the database's `custom.obsidian.project`
+                setting, else the name of the directory that holds
+                `beads_dir`. MUST NOT be set with `split`.
+              '';
+            };
+            split = lib.mkOption {
+              type = lib.types.nullOr (
+                lib.types.submodule {
+                  options = {
+                    by = lib.mkOption {
+                      type = lib.types.str;
+                      description = "Dotted path of the bead field that names its project.";
+                    };
+                    projects = lib.mkOption {
+                      type = lib.types.attrsOf nonEmpty;
+                      default = { };
+                      description = ''
+                        Field value to project name. A value not listed
+                        files under its last `/`-separated segment.
+                      '';
+                    };
+                  };
+                }
+              );
+              default = null;
+              description = "Files each bead by a field, for a database many repos share.";
+            };
+          };
+        }
       );
       default = [ ];
       example = lib.literalExpression ''
         [
-          "~/Workspaces/callisto"
-          { path = "~/Workspaces/other"; value = "github.com/o/other"; project = "Other"; }
+          { beads_dir = "~/Workspaces/callisto/.beads"; }
+          {
+            beads_dir = "~/work/tasksdb/.beads";
+            split.by = "metadata.repo";
+            split.projects."github.com/example/api" = "API";
+          }
         ]
       '';
       description = ''
-        Repo checkouts written to config.toml, synced by
-        `callisto sync --all`. Each is a path or a table with a `path`.
-        Every path MUST be absolute or start with `~/`.
-      '';
-    };
-
-    field = lib.mkOption {
-      type = lib.types.nullOr lib.types.str;
-      default = null;
-      example = "metadata.repo";
-      description = ''
-        Dotted path of the bead field that table entries match, unless
-        they set their own. Unset, callisto applies no default.
+        Beads databases written to config.toml, synced by
+        `callisto sync --all`.
       '';
     };
 
@@ -159,10 +156,10 @@ in
       default = null;
       example = "Inbox/Beads";
       description = ''
-        Vault-relative folder for the index note of unclaimed beads,
-        `Unfiled beads - <prefix>.md`. Unclaimed beads get no note of
-        their own. callisto never creates the folder, and a sync fails
-        if it is missing. callisto defaults it to `Inbox`.
+        Vault-relative folder for each split database's index of
+        unfiled beads, `Unfiled beads - <prefix>.md`. Unfiled beads get
+        no note of their own. callisto never creates the folder, and a
+        sync fails if it is missing. callisto defaults it to `Inbox`.
       '';
     };
 
@@ -206,36 +203,32 @@ in
 
         assertions =
           lib.optional (cfg.vault != null) (entryAssertion "vault" cfg.vault)
-          ++ lib.concatMap repoAssertions cfg.repos
-          ++ lib.optional (cfg.field != null) (fieldAssertion "field" "value" cfg.field)
+          ++ lib.concatMap databaseAssertions cfg.databases
           ++ lib.optional (cfg.unfiled != null) (unfiledAssertion cfg.unfiled);
 
-        # sync --all fails without a vault or with an empty repo list, so
-        # the job would log an error every run. A config.toml
+        # sync --all fails without a vault or with an empty database list,
+        # so the job would log an error every run. A config.toml
         # home-manager does not manage may still supply either, hence
         # warnings and not assertions.
         warnings =
-          lib.optionals (!generates) (
-            map
-              (name: "services.callisto.${name} is set, but neither vault nor repos is, so config.toml is not generated and it has no effect.")
-              (lib.filter (name: cfg.${name} != null) [ "field" "unfiled" ])
-          )
-          ++ (if cfg.repos != [ ] then
+          lib.optional (!generates && cfg.unfiled != null)
+            "services.callisto.unfiled is set, but neither vault nor databases is, so config.toml is not generated and it has no effect."
+          ++ (if cfg.databases != [ ] then
             lib.optional (cfg.vault == null)
               "services.callisto.vault is unset, so every scheduled `callisto sync --all` fails. Set services.callisto.vault."
           else if cfg.vault != null then
             [
-              "services.callisto.repos is empty, so every scheduled `callisto sync --all` fails. Set services.callisto.repos."
+              "services.callisto.databases is empty, so every scheduled `callisto sync --all` fails. Set services.callisto.databases."
             ]
           else
             lib.optional (!(config.xdg.configFile ? "callisto/config.toml"))
-              "services.callisto: neither vault nor repos is set, so the scheduled `callisto sync --all` fails unless ${config.xdg.configHome}/callisto/config.toml sets vault and lists repos. Set services.callisto.vault and services.callisto.repos, or manage that file through xdg.configFile, to silence this.");
+              "services.callisto: neither vault nor databases is set, so the scheduled `callisto sync --all` fails unless ${config.xdg.configHome}/callisto/config.toml sets vault and lists databases. Set services.callisto.vault and services.callisto.databases, or manage that file through xdg.configFile, to silence this.");
 
         xdg.configFile."callisto/config.toml" = lib.mkIf generates {
           source = (pkgs.formats.toml { }).generate "callisto-config.toml" (
             lib.filterAttrs (_: v: v != null) {
-              inherit (cfg) vault field unfiled;
-              repos = map renderRepo cfg.repos;
+              inherit (cfg) vault unfiled;
+              databases = map renderDatabase cfg.databases;
             }
           );
         };
