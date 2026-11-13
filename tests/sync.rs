@@ -1121,7 +1121,7 @@ fn index_empties_once_filed() {
     let report = f.run_split(A_AND_B).unwrap();
     assert!(report.updated.contains(&PathBuf::from(INDEX)), "{report:?}");
     let index = f.read(INDEX);
-    assert!(index.contains("No unclaimed beads."), "{index}");
+    assert!(index.contains("No unfiled beads."), "{index}");
     assert!(f.vault.join("Projects/B/three - zz-3.md").is_file());
 }
 

@@ -90,7 +90,7 @@ impl Condition {
             Condition::MissingProject { project, ids } => {
                 let (count, shown) = summarize_ids(ids);
                 let noun = if count == 1 { "bead" } else { "beads" };
-                format!("{count} {noun} claimed for missing project \"{project}\" ({shown})")
+                format!("{count} {noun} for missing project \"{project}\" ({shown})")
             }
             Condition::UnfiledMissing { folder } => format!(
                 "unfiled folder \"{}\" is missing; index not written",
@@ -385,7 +385,7 @@ mod tests {
         };
         assert_eq!(
             text(c),
-            "2 beads claimed for missing project \"Foo\" (w-3, w-4)"
+            "2 beads for missing project \"Foo\" (w-3, w-4)"
         );
     }
 
@@ -477,8 +477,8 @@ mod tests {
         let mut b = a.clone();
         b.reverse();
         let expected = "1 unfiled bead (w-9); \
-            1 bead claimed for missing project \"A\" (w-1); \
-            1 bead claimed for missing project \"B\" (w-2); \
+            1 bead for missing project \"A\" (w-1); \
+            1 bead for missing project \"B\" (w-2); \
             prefix \"p\" is used by /a, /b; removed beads were not marked; \
             prefix \"q\" is used by /b, /c; removed beads were not marked; \
             database /d cannot be read: r";

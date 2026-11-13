@@ -19,13 +19,13 @@ pub fn file_name(prefix: &str) -> String {
 pub fn index(prefix: &str, field: &FieldPath, unfiled: &[Unfiled]) -> String {
     let mut out = format!(
         "---\n{MARKER_KEY}: {MARKER_VALUE}\nbeadPrefix: {}\nobsidianUIMode: preview\n---\n\n\
-         > [!info] Beads no repo claims · {}\n\
+         > [!info] Beads callisto could not file · {}\n\
          > callisto rewrites this note on every sync. Edits are lost.\n\n",
         scalar(prefix),
         label(prefix),
     );
     if unfiled.is_empty() {
-        out.push_str("No unclaimed beads.\n");
+        out.push_str("No unfiled beads.\n");
         return out;
     }
     let mut rows: Vec<&Unfiled> = unfiled.iter().collect();
