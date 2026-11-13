@@ -32,6 +32,8 @@ pub struct Scope {
     pub prefixes: Vec<String>,
     /// Configured repos whose prefix could not be read.
     pub unreadable: Vec<PathBuf>,
+    /// Prefixes held by two or more configured databases.
+    pub shared: Vec<String>,
 }
 
 pub struct Request<'a> {

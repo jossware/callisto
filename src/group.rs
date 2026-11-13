@@ -3,45 +3,17 @@
 //! Repos that redirect to one database share its issues and its prefix,
 //! so they sync as one.
 
-use std::error::Error;
-use std::fmt;
 use std::fs;
-use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::bd::{Bd, BdError};
+use crate::bd::Bd;
 use crate::config::{RepoEntry, TableEntry};
+use crate::database::ContextError;
 use crate::field_path::FieldPath;
 use crate::remote::Git;
 use crate::repo::{self, PREFIX_KEY, Repo};
 use crate::standing::Condition;
 use crate::sync::Scope;
-
-#[derive(Debug)]
-pub enum ContextError {
-    Bd(BdError),
-    Canonicalize { path: PathBuf, source: io::Error },
-}
-
-impl fmt::Display for ContextError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ContextError::Bd(e) => e.fmt(f),
-            ContextError::Canonicalize { path, source } => {
-                write!(f, "{}: {source}", path.display())
-            }
-        }
-    }
-}
-
-impl Error for ContextError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            ContextError::Bd(e) => Some(e),
-            ContextError::Canonicalize { source, .. } => Some(source),
-        }
-    }
-}
 
 /// The canonical database directory `repo` uses, following any redirect.
 pub fn database(bd: &Bd, repo: &Repo) -> Result<PathBuf, ContextError> {
@@ -298,6 +270,7 @@ impl Groups {
         Scope {
             prefixes,
             unreadable,
+            shared: Vec::new(),
         }
     }
 

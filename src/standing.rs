@@ -13,12 +13,34 @@ const SHOWN_IDS: usize = 3;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Condition {
-    Unclaimed { ids: Vec<String> },
-    MissingProject { project: String, ids: Vec<String> },
-    UnfiledMissing { folder: PathBuf },
-    IndexTaken { path: PathBuf },
-    Unresolvable { path: PathBuf, reason: String },
-    GroupRule { reason: String },
+    Unclaimed {
+        ids: Vec<String>,
+    },
+    MissingProject {
+        project: String,
+        ids: Vec<String>,
+    },
+    UnfiledMissing {
+        folder: PathBuf,
+    },
+    IndexTaken {
+        path: PathBuf,
+    },
+    Unresolvable {
+        path: PathBuf,
+        reason: String,
+    },
+    GroupRule {
+        reason: String,
+    },
+    SharedPrefix {
+        prefix: String,
+        databases: Vec<PathBuf>,
+    },
+    Unreadable {
+        database: PathBuf,
+        reason: String,
+    },
     UnlistedSkipped,
 }
 
@@ -40,7 +62,9 @@ impl Condition {
             Condition::IndexTaken { .. } => 3,
             Condition::Unresolvable { .. } => 4,
             Condition::GroupRule { .. } => 5,
-            Condition::UnlistedSkipped => 6,
+            Condition::SharedPrefix { .. } => 6,
+            Condition::Unreadable { .. } => 7,
+            Condition::UnlistedSkipped => 8,
         }
     }
 
@@ -60,6 +84,15 @@ impl Condition {
                 (rank, path.display().to_string(), reason.clone(), vec![])
             }
             Condition::GroupRule { reason } => (rank, none(), reason.clone(), vec![]),
+            Condition::SharedPrefix { prefix, databases } => (
+                rank,
+                prefix.clone(),
+                none(),
+                databases.iter().map(|d| d.display().to_string()).collect(),
+            ),
+            Condition::Unreadable { database, reason } => {
+                (rank, database.display().to_string(), reason.clone(), vec![])
+            }
             Condition::UnlistedSkipped => (rank, none(), none(), vec![]),
         }
     }
@@ -88,6 +121,17 @@ impl Condition {
                 format!("table entry {} is unresolvable: {reason}", path.display())
             }
             Condition::GroupRule { reason } => format!("group not synced: {reason}"),
+            Condition::SharedPrefix { prefix, databases } => {
+                let dirs = databases
+                    .iter()
+                    .map(|d| d.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("prefix \"{prefix}\" is used by {dirs}; removed beads were not marked")
+            }
+            Condition::Unreadable { database, reason } => {
+                format!("database {} cannot be read: {reason}", database.display())
+            }
             Condition::UnlistedSkipped => {
                 "not in repos and a table entry is unresolvable; nothing synced".to_string()
             }
@@ -100,6 +144,7 @@ pub enum Subject {
     Group { database: PathBuf, repo: PathBuf },
     Config,
     Checkout(PathBuf),
+    Database(PathBuf),
 }
 
 impl Subject {
@@ -115,6 +160,7 @@ impl Subject {
             Subject::Group { database, .. } => format!("group:{}", database.display()),
             Subject::Config => "config".to_string(),
             Subject::Checkout(root) => format!("checkout:{}", root.display()),
+            Subject::Database(dir) => format!("database:{}", dir.display()),
         }
     }
 
@@ -122,13 +168,13 @@ impl Subject {
         match self {
             Subject::Group { repo, .. } => repo.display().to_string(),
             Subject::Config => "config".to_string(),
-            Subject::Checkout(root) => root.display().to_string(),
+            Subject::Checkout(root) | Subject::Database(root) => root.display().to_string(),
         }
     }
 
     pub fn repo(&self) -> Option<&Path> {
         match self {
-            Subject::Group { repo, .. } => Some(repo),
+            Subject::Group { repo, .. } | Subject::Database(repo) => Some(repo),
             _ => None,
         }
     }
@@ -329,6 +375,14 @@ mod tests {
                 reason: "r".into(),
             },
             Condition::GroupRule { reason: "r".into() },
+            Condition::SharedPrefix {
+                prefix: "p".into(),
+                databases: vec!["/a".into(), "/b".into()],
+            },
+            Condition::Unreadable {
+                database: "/d".into(),
+                reason: "r".into(),
+            },
             Condition::UnlistedSkipped,
         ];
         for c in failing {
@@ -430,6 +484,20 @@ mod tests {
             "group not synced: r"
         );
         assert_eq!(
+            text(Condition::SharedPrefix {
+                prefix: "p".into(),
+                databases: vec!["/a/.beads".into(), "/b/.beads".into()],
+            }),
+            "prefix \"p\" is used by /a/.beads, /b/.beads; removed beads were not marked"
+        );
+        assert_eq!(
+            text(Condition::Unreadable {
+                database: "/a/.beads".into(),
+                reason: "no such directory".into(),
+            }),
+            "database /a/.beads cannot be read: no such directory"
+        );
+        assert_eq!(
             text(Condition::UnlistedSkipped),
             "not in repos and a table entry is unresolvable; nothing synced"
         );
@@ -489,6 +557,10 @@ mod tests {
         let c = Subject::Checkout(PathBuf::from("/c"));
         assert_eq!(c.key(), "checkout:/c");
         assert_eq!(c.label(), "/c");
+        let d = Subject::Database(PathBuf::from("/d/.beads"));
+        assert_eq!(d.key(), "database:/d/.beads");
+        assert_eq!(d.label(), "/d/.beads");
+        assert_eq!(d.repo(), Some(std::path::Path::new("/d/.beads")));
     }
 
     use std::collections::BTreeMap;

@@ -104,6 +104,7 @@ impl Fixture {
         Scope {
             prefixes: vec![self.prefix.clone()],
             unreadable: vec![],
+            shared: vec![],
         }
     }
 
@@ -588,6 +589,7 @@ fn removal_spares_other_prefixes() {
     let scope = Scope {
         prefixes: vec!["a".into(), "a-b".into()],
         unreadable: vec![],
+        shared: vec![],
     };
     let report = f.run_with(&scope).unwrap();
     assert!(report.removed.is_empty());
@@ -604,6 +606,7 @@ fn unreadable_scope_skips_removal() {
     let scope = Scope {
         prefixes: vec!["a".into()],
         unreadable: vec![PathBuf::from("/nowhere")],
+        shared: vec![],
     };
     let report = f.run_with(&scope).unwrap();
     assert!(report.removed.is_empty());
@@ -702,6 +705,7 @@ fn longer_prefix_export_is_refused() {
     let scope = Scope {
         prefixes: vec!["a".into(), "a-b".into()],
         unreadable: vec![],
+        shared: vec![],
     };
     let err = f.run_with(&scope).unwrap_err();
     assert_eq!(err.stage(), Stage::Export);

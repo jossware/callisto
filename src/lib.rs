@@ -4,6 +4,7 @@ pub mod claim;
 pub mod cli;
 pub mod cmd;
 pub mod config;
+pub mod database;
 pub mod errlog;
 pub mod export;
 pub mod field_path;
