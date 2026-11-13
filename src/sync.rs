@@ -255,8 +255,7 @@ pub fn sync_database(_lock: &Lock, req: &Request) -> Result<Report, Error> {
         Filer::Split(split) => Some(&split.by),
         Filer::Single(_) => None,
     };
-    let mut export =
-        export::export_with_field(req.bd, &database.dir, field).map_err(Error::Export)?;
+    let mut export = export::export(req.bd, &database.dir, field).map_err(Error::Export)?;
     let mut prefixes: Vec<&str> = req.scope.prefixes.iter().map(String::as_str).collect();
     prefixes.push(&prefix);
     let foreign = export

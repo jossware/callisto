@@ -243,7 +243,6 @@ esac"#,
         fs::create_dir_all(path.join(".beads")).unwrap();
         Repo {
             root: path.canonicalize().unwrap(),
-            name: name.to_string(),
         }
     }
 
