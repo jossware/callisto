@@ -71,11 +71,18 @@ pub fn map(
 }
 
 pub fn find(vault: &Path, locations: &[PathBuf], name: &str) -> Option<Project> {
-    // An override is free text and must not reach outside the locations.
-    if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\\']) {
+    // The vault scan skips dot-prefixed entries, so notes filed there would
+    // vanish. An override is free text and must not reach outside the
+    // locations.
+    if name.is_empty() || name.starts_with('.') || name.contains(['/', '\\']) {
         return None;
     }
     locations.iter().find_map(|loc| {
+        // The vault scan does not follow symlinks, so notes filed through
+        // one would vanish.
+        if !is_real_dir(vault, loc) {
+            return None;
+        }
         // Listing rather than probing keeps a case-insensitive filesystem
         // from matching `Foo` to `foo`.
         if !is_dir_entry(&vault.join(loc), name) {
@@ -92,8 +99,16 @@ fn is_dir_entry(dir: &Path, name: &str) -> bool {
     let Ok(entries) = fs::read_dir(dir) else {
         return false;
     };
-    entries.flatten().any(|entry| {
-        entry.file_name() == name && fs::metadata(entry.path()).is_ok_and(|meta| meta.is_dir())
+    entries
+        .flatten()
+        .any(|entry| entry.file_name() == name && entry.file_type().is_ok_and(|t| t.is_dir()))
+}
+
+fn is_real_dir(vault: &Path, loc: &Path) -> bool {
+    let mut path = vault.to_path_buf();
+    loc.components().all(|part| {
+        path.push(part);
+        fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_dir())
     })
 }
 
@@ -223,14 +238,63 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn symlinked_folder_is_found() {
+    fn symlinked_folder_is_not_found() {
         let vault = tempfile::tempdir().unwrap();
         let v = vault.path();
         fs::create_dir_all(v.join("elsewhere/a")).unwrap();
         fs::create_dir_all(v.join("Projects")).unwrap();
         std::os::unix::fs::symlink(v.join("elsewhere/a"), v.join("Projects/a")).unwrap();
+        assert_eq!(find(v, &defaults(), "a"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_falls_through_to_later_location() {
+        let vault = tempfile::tempdir().unwrap();
+        let v = vault.path();
+        fs::create_dir_all(v.join("elsewhere/a")).unwrap();
+        fs::create_dir_all(v.join("Projects")).unwrap();
+        std::os::unix::fs::symlink(v.join("elsewhere/a"), v.join("Projects/a")).unwrap();
+        dir(v, "Areas", "a");
         assert_eq!(
             find(v, &defaults(), "a"),
+            project("a", PathBuf::from("Areas/a"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_location_is_skipped() {
+        let vault = tempfile::tempdir().unwrap();
+        let v = vault.path();
+        dir(v, "real", "a");
+        std::os::unix::fs::symlink(v.join("real"), v.join("Projects")).unwrap();
+        assert_eq!(find(v, &defaults(), "a"), None);
+        fs::create_dir_all(v.join("Y")).unwrap();
+        std::os::unix::fs::symlink(v.join("real"), v.join("Y/Z")).unwrap();
+        assert_eq!(find(v, &list(&["Y/Z"]), "a"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_symlink_is_not_found() {
+        let vault = tempfile::tempdir().unwrap();
+        let v = vault.path();
+        fs::create_dir_all(v.join("Projects")).unwrap();
+        std::os::unix::fs::symlink(v.join("gone"), v.join("Projects/a")).unwrap();
+        assert_eq!(find(v, &defaults(), "a"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_vault_root_is_followed() {
+        let real = tempfile::tempdir().unwrap();
+        dir(real.path(), "Projects", "a");
+        let holder = tempfile::tempdir().unwrap();
+        let link = holder.path().join("vault");
+        std::os::unix::fs::symlink(real.path(), &link).unwrap();
+        assert_eq!(
+            find(&link, &defaults(), "a"),
             project("a", PathBuf::from("Projects/a"))
         );
     }
@@ -258,6 +322,38 @@ mod tests {
         for name in ["", ".", "..", "a/b", "../Areas/x", "a\\b"] {
             assert_eq!(find(v, &defaults(), name), None, "{name:?}");
         }
+    }
+
+    #[test]
+    fn dot_prefixed_names_match_nothing() {
+        let vault = tempfile::tempdir().unwrap();
+        let v = vault.path();
+        dir(v, "Projects", ".dotfiles");
+        dir(v, "Areas", ".x");
+        for name in [".dotfiles", ".x"] {
+            assert_eq!(find(v, &defaults(), name), None, "{name:?}");
+        }
+    }
+
+    #[test]
+    fn inner_dot_name_is_found() {
+        let vault = tempfile::tempdir().unwrap();
+        let rel = dir(vault.path(), "Projects", "a.b");
+        assert_eq!(find(vault.path(), &defaults(), "a.b"), project("a.b", rel));
+    }
+
+    #[test]
+    fn dot_prefixed_default_is_unmapped() {
+        let vault = tempfile::tempdir().unwrap();
+        dir(vault.path(), "Areas", ".dotfiles");
+        let err = map(vault.path(), &defaults(), ".dotfiles", &settings(None)).unwrap_err();
+        assert_eq!(
+            err,
+            Unmapped {
+                name: ".dotfiles".into(),
+                source: Source::Default,
+            }
+        );
     }
 
     #[test]
