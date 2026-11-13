@@ -1192,6 +1192,20 @@ fn custom_unfiled_folder() {
 }
 
 #[test]
+fn custom_locations_folder() {
+    let sb = Sandbox::new();
+    let db = rollout(&sb);
+    fs::create_dir_all(sb.vault().join("Work/a")).unwrap();
+    fs::create_dir_all(sb.vault().join("Work/b")).unwrap();
+    split_config(&sb, &db, "locations = [\"Work\"]\n");
+    let out = sb.run(&sb.path("home"), &["sync", "--all"]);
+    assert_eq!(out.code, Some(0), "{}", out.stderr);
+    assert!(sb.note("Work/a/first - w-1.md"), "{}", out.stderr);
+    assert!(sb.note("Work/b/second - w-2.md"), "{}", out.stderr);
+    assert!(!sb.note("Projects/a/first - w-1.md"), "{}", out.stderr);
+}
+
+#[test]
 fn hook_writes_index() {
     let sb = Sandbox::new();
     let db = rollout(&sb);

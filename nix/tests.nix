@@ -335,19 +335,105 @@ let
           ];
         };
 
+        test_locations_accepted =
+          let
+            configured = enabled {
+              locations = [
+                "Work"
+                "Archive/Work"
+              ];
+            };
+          in
+          {
+            expr = {
+              file = configured.xdg.configFile ? "callisto/config.toml";
+              failed = failed configured;
+            };
+            expected = {
+              file = true;
+              failed = [ ];
+            };
+          };
+
+        test_bad_location_fails_assertion = {
+          expr = map (l: rejected { locations = [ l ]; }) [
+            "/abs"
+            "a/../b"
+            "./a"
+            ""
+            "a//b"
+            ".work"
+            "Work/.projects"
+            "Work"
+          ];
+          expected = [
+            true
+            true
+            true
+            true
+            true
+            true
+            true
+            false
+          ];
+        };
+
+        test_duplicate_location_fails_assertion = {
+          expr = map (ls: rejected { locations = ls; }) [
+            [
+              "A"
+              "A"
+            ]
+            [
+              "A"
+              "B"
+            ]
+          ];
+          expected = [
+            true
+            false
+          ];
+        };
+
+        test_empty_locations_rejected = {
+          expr = rejected { locations = [ ]; };
+          expected = true;
+        };
+
         # The loader reads a leading ~ as an ordinary directory name.
         test_tilde_unfiled_is_relative = {
           expr = rejected { unfiled = "~/x"; };
           expected = false;
         };
 
-        test_warns_on_unused_unfiled = {
-          expr = warned (with' {
-            enable = true;
-            unfiled = "U";
-          } { xdg.configFile."callisto/config.toml".text = ""; });
+        test_warns_on_unused_unfiled_or_locations = {
+          expr =
+            map
+              (
+                settings:
+                warned (with' ({ enable = true; } // settings) {
+                  xdg.configFile."callisto/config.toml".text = "";
+                })
+              )
+              [
+                { unfiled = "U"; }
+                { locations = [ "L" ]; }
+                {
+                  unfiled = "U";
+                  locations = [ "L" ];
+                }
+              ];
           expected = [
-            "services.callisto.unfiled is set, but neither vault nor databases is, so config.toml is not generated and it has no effect."
+            [
+              "services.callisto.unfiled is set, but neither vault nor databases is, so config.toml is not generated and it has no effect."
+            ]
+            [
+              "services.callisto.locations is set, but neither vault nor databases is, so config.toml is not generated and it has no effect."
+            ]
+            [
+              "services.callisto.unfiled is set, but neither vault nor databases is, so config.toml is not generated and it has no effect."
+              "services.callisto.locations is set, but neither vault nor databases is, so config.toml is not generated and it has no effect."
+            ]
           ];
         };
       };

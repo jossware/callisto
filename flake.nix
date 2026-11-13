@@ -104,6 +104,10 @@
               nativeBuildInputs = [ pkgs.python3 ];
               full = toml {
                 vault = "~/org";
+                locations = [
+                  "Work"
+                  "Archive/Work"
+                ];
                 databases = [
                   { beads_dir = "~/Workspaces/a/.beads"; }
                   {
@@ -132,6 +136,7 @@
               full = load("full")
               assert full == {
                   "vault": "~/org",
+                  "locations": ["Work", "Archive/Work"],
                   "databases": [
                       {"beads_dir": "~/Workspaces/a/.beads"},
                       {"beads_dir": "/srv/b/.beads", "project": "B"},
@@ -173,6 +178,10 @@
               path = toml {
                 vault = "~/org";
                 unfiled = "Inbox/Beads";
+                locations = [
+                  "Work"
+                  "Archive/Work"
+                ];
                 databases = [
                   {
                     beads_dir = "/srv/tasksdb/.beads";

@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use callisto::config::{Config, DatabaseEntry, Filing, Split};
+use callisto::project::DEFAULT_LOCATIONS;
 
 #[test]
 #[ignore]
@@ -19,6 +20,7 @@ fn module_config_loads() {
         Config {
             vault: Some(PathBuf::from("/h/org")),
             unfiled: PathBuf::from("Inbox"),
+            locations: DEFAULT_LOCATIONS.iter().map(PathBuf::from).collect(),
             databases: vec![
                 DatabaseEntry {
                     beads_dir: PathBuf::from("/h/Workspaces/callisto/.beads"),
@@ -39,6 +41,7 @@ fn module_config_loads() {
         Config {
             vault: Some(PathBuf::from("/h/org")),
             unfiled: PathBuf::from("Inbox/Beads"),
+            locations: vec![PathBuf::from("Work"), PathBuf::from("Archive/Work")],
             databases: vec![
                 DatabaseEntry {
                     beads_dir: PathBuf::from("/srv/tasksdb/.beads"),

@@ -2,7 +2,7 @@
 //! its `split.by` field.
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::bead::Bead;
 use crate::field_path::FieldValue;
@@ -63,6 +63,7 @@ pub fn split_project(
 /// vault for them. `fields` holds each bead's `split.by` value.
 pub fn partition_split(
     vault: &Path,
+    locations: &[PathBuf],
     beads: &[Bead],
     fields: &HashMap<String, FieldValue>,
     projects: &BTreeMap<String, String>,
@@ -75,7 +76,7 @@ pub fn partition_split(
             Ok(name) => {
                 let project = found
                     .entry(name.clone())
-                    .or_insert_with(|| project::find(vault, &name));
+                    .or_insert_with(|| project::find(vault, locations, &name));
                 match project {
                     Some(project) => {
                         out.filed.insert(bead.id.clone(), project.clone());
@@ -167,16 +168,20 @@ mod tests {
     #[test]
     fn partition_split_sends_missing_project_to_unfiled() {
         let vault = tempfile::tempdir().unwrap();
-        let home = vault.path().join("Projects/web");
-        std::fs::create_dir_all(&home).unwrap();
-        std::fs::write(home.join("web.md"), "").unwrap();
+        std::fs::create_dir_all(vault.path().join("Projects/web")).unwrap();
         let beads = [
             crate::bead::test_support::bead("a", "A"),
             crate::bead::test_support::bead("b", "B"),
             crate::bead::test_support::bead("c", "C"),
         ];
         let fields = HashMap::from([("a".to_string(), s("o/web")), ("b".to_string(), s("o/zzz"))]);
-        let out = partition_split(vault.path(), &beads, &fields, &BTreeMap::new());
+        let out = partition_split(
+            vault.path(),
+            &project::DEFAULT_LOCATIONS.map(PathBuf::from),
+            &beads,
+            &fields,
+            &BTreeMap::new(),
+        );
         assert_eq!(out.filed["a"].name, "web");
         let reasons: Vec<_> = out.unfiled.iter().map(|u| (&u.id[..], &u.reason)).collect();
         assert_eq!(

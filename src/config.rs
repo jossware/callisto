@@ -12,16 +12,22 @@ use serde::Deserialize;
 
 use crate::field_path::FieldPath;
 use crate::paths::expand_tilde;
+use crate::project::DEFAULT_LOCATIONS;
 
 const DEFAULT_UNFILED: &str = "Inbox";
 
-/// Vault and database paths are expanded and absolute. `unfiled` is
-/// relative to the vault.
+/// Vault and database paths are expanded and absolute. `unfiled` and
+/// `locations` are relative to the vault.
 #[derive(Debug, PartialEq)]
 pub struct Config {
     pub vault: Option<PathBuf>,
     pub databases: Vec<DatabaseEntry>,
     pub unfiled: PathBuf,
+    pub locations: Vec<PathBuf>,
+}
+
+fn default_locations() -> Vec<PathBuf> {
+    DEFAULT_LOCATIONS.iter().map(PathBuf::from).collect()
 }
 
 impl Default for Config {
@@ -30,6 +36,7 @@ impl Default for Config {
             vault: None,
             databases: Vec::new(),
             unfiled: PathBuf::from(DEFAULT_UNFILED),
+            locations: default_locations(),
         }
     }
 }
@@ -60,6 +67,7 @@ struct Raw {
     #[serde(default)]
     databases: Vec<RawDatabase>,
     unfiled: Option<PathBuf>,
+    locations: Option<Vec<PathBuf>>,
 }
 
 #[derive(Deserialize)]
@@ -183,6 +191,28 @@ impl Config {
             .unfiled
             .unwrap_or_else(|| PathBuf::from(DEFAULT_UNFILED));
         check_unfiled(&unfiled).map_err(|r| invalid("unfiled", r))?;
+        let locations = match raw.locations {
+            None => default_locations(),
+            Some(list) if list.is_empty() => return Err(invalid("locations", "must not be empty")),
+            Some(list) => {
+                for (i, loc) in list.iter().enumerate() {
+                    let key = format!("locations[{i}]");
+                    check_unfiled(loc).map_err(|r| invalid(&key, r))?;
+                    // The vault scan skips dot-prefixed entries, so notes filed
+                    // under one would never be found again.
+                    if loc
+                        .components()
+                        .any(|c| c.as_os_str().as_encoded_bytes().starts_with(b"."))
+                    {
+                        return Err(invalid(&key, "must not have a segment starting with `.`"));
+                    }
+                    if list[..i].contains(loc) {
+                        return Err(invalid(&key, "is listed twice"));
+                    }
+                }
+                list
+            }
+        };
         let vault = raw.vault.map(resolve).transpose()?;
         let mut databases: Vec<DatabaseEntry> = Vec::with_capacity(raw.databases.len());
         for (i, entry) in raw.databases.into_iter().enumerate() {
@@ -237,6 +267,7 @@ impl Config {
             vault,
             databases,
             unfiled,
+            locations,
         })
     }
 }
@@ -339,6 +370,7 @@ beads_dir = "~/Workspaces/ganymede/.beads"
                     filing: Filing::Single { project: None },
                 }],
                 unfiled: "Inbox".into(),
+                locations: default_locations(),
             }
         );
     }
@@ -384,6 +416,62 @@ beads_dir = "~/Workspaces/ganymede/.beads"
             let (_, config) = load_text(&format!("unfiled = \"{ok}\""), home());
             assert_eq!(config.unwrap().unfiled, Path::new(ok));
         }
+    }
+
+    #[test]
+    fn locations_default_to_the_four() {
+        let want: Vec<PathBuf> = ["Projects", "Areas", "Archives/Projects", "Archives/Areas"]
+            .iter()
+            .map(PathBuf::from)
+            .collect();
+        assert_eq!(Config::default().locations, want);
+        assert_eq!(load_text("", home()).1.unwrap().locations, want);
+    }
+
+    #[test]
+    fn locations_are_kept_in_order() {
+        let c = load_text(r#"locations = ["Work/Clients", "Notes"]"#, home())
+            .1
+            .unwrap();
+        assert_eq!(
+            c.locations,
+            vec![PathBuf::from("Work/Clients"), PathBuf::from("Notes")]
+        );
+    }
+
+    #[test]
+    fn empty_locations_is_an_error() {
+        assert_eq!(invalid_key("locations = []"), "locations");
+    }
+
+    #[test]
+    fn bad_location_is_an_error() {
+        for bad in ["", "/abs", "a/../b", "./a", "a//b", "a/", ".."] {
+            assert_eq!(
+                invalid_key(&format!(r#"locations = ["Ok", "{bad}"]"#)),
+                "locations[1]",
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn hidden_location_is_an_error() {
+        for bad in [".work", "Work/.projects"] {
+            assert_eq!(
+                invalid_key(&format!(r#"locations = ["Ok", "{bad}"]"#)),
+                "locations[1]",
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn duplicate_location_is_an_error() {
+        assert_eq!(
+            invalid_key(r#"locations = ["A", "B", "A"]"#),
+            "locations[2]"
+        );
     }
 
     #[test]
@@ -474,6 +562,7 @@ beads_dir = "~/Workspaces/ganymede/.beads"
                     filing: Filing::Single { project: None },
                 }],
                 unfiled: "Inbox".into(),
+                locations: default_locations(),
             }
         );
     }
