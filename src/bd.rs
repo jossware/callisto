@@ -77,23 +77,40 @@ impl Bd {
         }
     }
 
-    fn command(&self, checkout: &Path, args: &[&str]) -> Command {
+    fn command(&self, dir: &Path, args: &[&str], target: Target<'_>) -> Command {
         let mut command = Command::new(&self.program);
-        // Either variable points bd at another repo's database, whose export
-        // would read as this repo having lost every bead.
+        // BEADS_DB points bd at another repo's database, whose export would
+        // read as this repo having lost every bead.
         command
             .args(args)
-            .current_dir(checkout)
-            .env_remove("BEADS_DIR")
+            .current_dir(dir)
             .env_remove("BEADS_DB")
             .stdin(Stdio::null());
+        match target {
+            Target::Discover => {
+                command.env_remove("BEADS_DIR");
+            }
+            Target::Inherit => {}
+            Target::Database(database) => {
+                command.env("BEADS_DIR", database);
+            }
+        }
         command
     }
 
     /// Runs bd in `checkout` and returns its stdout.
     pub fn run(&self, checkout: &Path, args: &[&str]) -> Result<String, BdError> {
+        self.exec(checkout, args, Target::Discover)
+    }
+
+    /// Runs bd against the beads database at `database`.
+    pub fn run_on(&self, database: &Path, args: &[&str]) -> Result<String, BdError> {
+        self.exec(database, args, Target::Database(database))
+    }
+
+    fn exec(&self, dir: &Path, args: &[&str], target: Target<'_>) -> Result<String, BdError> {
         let output = self
-            .command(checkout, args)
+            .command(dir, args, target)
             .output()
             .map_err(|source| BdError::Spawn {
                 program: self.program.clone(),
@@ -116,26 +133,53 @@ impl Bd {
         // The text form prints `<key> (not set)` for an unset key, which a
         // value could also read as.
         let args = ["config", "get", "--json", key];
-        let out = self.run(checkout, &args)?;
-        let parsed: ConfigValue =
-            serde_json::from_str(&out).map_err(|source| BdError::Malformed {
-                args: args.join(" "),
-                source,
-            })?;
-        let value = parsed.value.as_deref().map(str::trim).unwrap_or_default();
-        Ok((!value.is_empty()).then(|| value.to_string()))
+        parse_config(&args, &self.run(checkout, &args)?)
+    }
+
+    /// Reads one `bd config` key of the database at `database`.
+    pub fn config_get_on(&self, database: &Path, key: &str) -> Result<Option<String>, BdError> {
+        let args = ["config", "get", "--json", key];
+        parse_config(&args, &self.run_on(database, &args)?)
+    }
+
+    /// Asks bd, run in `dir`, which database it would use there. The
+    /// caller's `BEADS_DIR` still applies.
+    pub fn lookup(&self, dir: &Path) -> Result<Context, BdError> {
+        let args = ["context", "--json"];
+        let out = self.exec(dir, &args, Target::Inherit)?;
+        parse_context(&args, &out)
     }
 
     /// Reads where bd keeps the database for `checkout`, following any
     /// redirect.
     pub fn context(&self, checkout: &Path) -> Result<Context, BdError> {
         let args = ["context", "--json"];
-        let out = self.run(checkout, &args)?;
-        serde_json::from_str(&out).map_err(|source| BdError::Malformed {
-            args: args.join(" "),
-            source,
-        })
+        parse_context(&args, &self.run(checkout, &args)?)
     }
+}
+
+/// Which beads database a bd call reaches.
+#[derive(Clone, Copy)]
+enum Target<'a> {
+    Discover,
+    Inherit,
+    Database(&'a Path),
+}
+
+fn parse_config(args: &[&str], out: &str) -> Result<Option<String>, BdError> {
+    let parsed: ConfigValue = serde_json::from_str(out).map_err(|source| BdError::Malformed {
+        args: args.join(" "),
+        source,
+    })?;
+    let value = parsed.value.as_deref().map(str::trim).unwrap_or_default();
+    Ok((!value.is_empty()).then(|| value.to_string()))
+}
+
+fn parse_context(args: &[&str], out: &str) -> Result<Context, BdError> {
+    serde_json::from_str(out).map_err(|source| BdError::Malformed {
+        args: args.join(" "),
+        source,
+    })
 }
 
 /// What `bd context` reports about a checkout.
@@ -216,7 +260,7 @@ mod tests {
     #[test]
     fn ignores_inherited_beads_location() {
         let bd = Bd::default();
-        let command = bd.command(Path::new("."), &["export"]);
+        let command = bd.command(Path::new("."), &["export"], Target::Discover);
         let removed: Vec<_> = command
             .get_envs()
             .filter(|(_, value)| value.is_none())
@@ -224,6 +268,52 @@ mod tests {
             .collect();
         assert!(removed.contains(&"BEADS_DIR".into()), "{removed:?}");
         assert!(removed.contains(&"BEADS_DB".into()), "{removed:?}");
+    }
+
+    #[test]
+    fn run_on_sets_beads_dir_and_runs_in_the_database() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tools = tempfile::tempdir().unwrap();
+        let bd = Bd::new(fake_bd(
+            tools.path(),
+            r#"echo "$BEADS_DIR|${BEADS_DB-unset}|$(pwd -P)""#,
+        ));
+        let out = bd.run_on(tmp.path(), &["export"]).unwrap();
+        let here = tmp.path().canonicalize().unwrap();
+        assert_eq!(
+            out.trim(),
+            format!("{}|unset|{}", tmp.path().display(), here.display())
+        );
+    }
+
+    #[test]
+    fn config_get_on_reads_the_named_database() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tools = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("prefix"), "p").unwrap();
+        let bd = Bd::new(fake_bd(
+            tools.path(),
+            r#"printf '{"key":"issue_prefix","value":"%s"}\n' "$(cat "$BEADS_DIR/prefix")""#,
+        ));
+        assert_eq!(
+            bd.config_get_on(tmp.path(), "issue_prefix")
+                .unwrap()
+                .as_deref(),
+            Some("p")
+        );
+    }
+
+    #[test]
+    fn lookup_runs_in_the_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tools = tempfile::tempdir().unwrap();
+        let bd = Bd::new(fake_bd(
+            tools.path(),
+            r#"printf '{"beads_dir":"%s/.beads"}\n' "$(pwd -P)""#,
+        ));
+        let context = bd.lookup(tmp.path()).unwrap();
+        let here = tmp.path().canonicalize().unwrap();
+        assert_eq!(context.beads_dir, here.join(".beads"));
     }
 
     fn config_bd(dir: &Path, value: &str) -> Bd {
