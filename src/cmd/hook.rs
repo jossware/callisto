@@ -124,6 +124,7 @@ pub fn run(vault: Option<&Path>, env: &Env, bd: &Bd, stdin: &mut dyn Read, err: 
             bd,
             vault: &vault,
             database,
+            configured: databases.configured(&database.dir).is_some(),
             scope: &scope,
             tz: &TimeZone::system(),
             unfiled: &config.unfiled,

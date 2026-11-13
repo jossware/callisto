@@ -158,6 +158,7 @@ impl Fixture {
                 bd: &self.bd,
                 vault: &self.vault,
                 database,
+                configured: true,
                 scope,
                 tz: &tz,
                 unfiled: Path::new("Inbox"),

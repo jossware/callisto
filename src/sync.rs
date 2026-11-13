@@ -41,6 +41,8 @@ pub struct Request<'a> {
     pub bd: &'a Bd,
     pub vault: &'a Path,
     pub database: &'a Database,
+    /// False for a checkout's own database that the config does not list.
+    pub configured: bool,
     pub scope: &'a Scope,
     pub tz: &'a TimeZone,
     /// Vault-relative folder for a split database's index of unfiled
@@ -91,6 +93,11 @@ pub enum Warning {
     /// Removal was skipped: another configured database uses this prefix,
     /// so a bead absent from this export may be in that one.
     SharedPrefix {
+        prefix: String,
+    },
+    /// Removal was skipped: this unconfigured database uses a configured
+    /// database's prefix, so its export may lack that database's beads.
+    ConfiguredPrefix {
         prefix: String,
     },
 }
@@ -144,6 +151,10 @@ impl fmt::Display for Warning {
             Warning::SharedPrefix { prefix } => write!(
                 f,
                 "another configured database uses prefix \"{prefix}\"; removed beads were not marked"
+            ),
+            Warning::ConfiguredPrefix { prefix } => write!(
+                f,
+                "this database is not configured but a configured one uses prefix \"{prefix}\"; removed beads were not marked"
             ),
         }
     }
@@ -330,6 +341,10 @@ pub fn sync_database(_lock: &Lock, req: &Request) -> Result<Report, Error> {
     }
     if req.scope.shared.contains(&prefix) {
         report.warnings.push(Warning::SharedPrefix { prefix });
+        return Ok(report);
+    }
+    if !req.configured && req.scope.prefixes.contains(&prefix) {
+        report.warnings.push(Warning::ConfiguredPrefix { prefix });
         return Ok(report);
     }
     mark_removed(

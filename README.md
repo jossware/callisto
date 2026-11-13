@@ -212,6 +212,9 @@ tell which database owns a note.
   create and update notes.
 - While any configured database cannot be read (its directory is
   missing, or its prefix cannot be read), no sync marks notes removed.
+- A database that is not configured but uses a configured database's
+  prefix, such as a second clone of a configured repo, still creates
+  and updates notes. It never marks notes removed, and warns why.
 
 ### Unfiled beads
 

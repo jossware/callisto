@@ -170,6 +170,7 @@ fn sync(args: &Args, env: &Env, bd: &Bd, cwd: &Path, state: &Path, out: &mut Out
             bd,
             vault: &vault,
             database,
+            configured: databases.configured(&database.dir).is_some(),
             scope: &scope,
             tz: &tz,
             unfiled: &config.unfiled,

@@ -857,6 +857,46 @@ fn hook_in_redirected_checkout_syncs_the_configured_database() {
     assert!(sb.log().is_empty(), "{:?}", sb.log());
 }
 
+/// A second clone of configured `a`, with its own `.beads` and an empty
+/// export.
+fn unconfigured_clone(sb: &Sandbox) -> (PathBuf, String) {
+    let a = sb.repo("a", "a", &[("a-1", "first")]);
+    sb.config(&["a"]);
+    let out = sb.run(&a, &["sync"]);
+    assert_eq!(out.code, Some(0), "{}", out.stderr);
+    let note = fs::read_to_string(sb.vault().join("Projects/a/first - a-1.md")).unwrap();
+    (sb.repo("clone", "a", &[]), note)
+}
+
+#[test]
+fn unconfigured_clone_of_a_configured_prefix_removes_nothing() {
+    let sb = Sandbox::new();
+    let (clone, note) = unconfigured_clone(&sb);
+    let out = sb.run(&sb.path("repos"), &["sync", clone.to_str().unwrap()]);
+    assert_eq!(out.code, Some(0), "{}", out.stderr);
+    assert_eq!(
+        out.stdout,
+        "clone: 0 created, 0 updated, 0 removed, 0 unchanged\n"
+    );
+    assert!(
+        out.stderr.contains("removed beads were not marked"),
+        "{}",
+        out.stderr
+    );
+    let after = fs::read_to_string(sb.vault().join("Projects/a/first - a-1.md")).unwrap();
+    assert_eq!(after, note);
+}
+
+#[test]
+fn hook_in_unconfigured_clone_of_a_configured_prefix_removes_nothing() {
+    let sb = Sandbox::new();
+    let (clone, note) = unconfigured_clone(&sb);
+    let out = sb.hook(&payload(&clone), &[], &[]);
+    assert_quiet_exit(&out);
+    let after = fs::read_to_string(sb.vault().join("Projects/a/first - a-1.md")).unwrap();
+    assert_eq!(after, note);
+}
+
 #[test]
 fn paths_to_one_database_sync_it_once() {
     let sb = Sandbox::new();
