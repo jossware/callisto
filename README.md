@@ -105,6 +105,7 @@ The shared database needs no clone of any repo.
 |---|---|
 | `vault` | Vault root. Required here or by `--vault`, which overrides it. |
 | `unfiled` | Vault folder for the index of unfiled beads. Default `Inbox`. |
+| `locations` | Vault folders searched, in order, for a project's folder. Default `Projects`, `Areas`, `Archives/Projects`, `Archives/Areas`. A list replaces the default. |
 | `databases` | The databases `sync --all` syncs, in order. |
 
 Each `[[databases]]` entry:
@@ -125,6 +126,10 @@ Each `[[databases]]` entry:
 - `split.by` segments MUST NOT be empty.
 - `unfiled` MUST be relative to the vault, with no empty, `.` or `..`
   segment.
+- Each `locations` entry follows the same rule as `unfiled`. A
+  segment MUST NOT start with `.`: the vault scan skips such folders,
+  so notes filed there would be lost. The list MUST NOT be empty and
+  MUST NOT repeat an entry.
 - Unknown keys are an error, inside an entry and inside `split` too,
   so a typo cannot empty the list.
 - A `beads_dir` that does not exist does not fail loading. It fails
@@ -163,9 +168,16 @@ list, an object or `null` sends the bead to the
 `custom.obsidian.project` is not consulted: repos that share a
 database share its settings.
 
-A project's home note is looked up at `Projects/<Name>/<Name>.md`,
-`Areas/<Name>/<Name>.md`, `Archives/Projects/<Name>/<Name>.md`, then
-`Archives/Areas/<Name>/<Name>.md`. New notes go in that folder, named
+A project's folder is the first `<location>/<Name>` directory, in
+`locations` order, that exists. By default that is `Projects/<Name>`,
+`Areas/<Name>`, `Archives/Projects/<Name>`, then
+`Archives/Areas/<Name>`. The name matches by exact case. The first
+directory wins whatever it holds, so a stray empty folder earlier in
+the list hides a later one.
+
+No home note is required. Without a `<Name>.md` note in the vault,
+the `[[Name]]` link in a note's `projects:` resolves to nothing in
+Obsidian. New notes go in the folder, named
 `<title> - <bead-id>.md`. callisto never creates a project.
 
 - A single-project database whose project is not in the vault is
@@ -394,6 +406,7 @@ log every run.
 | `services.callisto.vault` | `null` | Written to `config.toml`. |
 | `services.callisto.databases` | `[ ]` | Written to `config.toml`. Each entry has `beads_dir`, and optionally `project` or `split` (`by`, `projects`). Each `beads_dir` MUST be absolute or start with `~/`. |
 | `services.callisto.unfiled` | `null` | Written to `config.toml`. Unset, callisto uses `Inbox`. |
+| `services.callisto.locations` | `null` | Written to `config.toml`. Unset, callisto uses its default list. |
 | `services.callisto.path` | profile `bin`, then system dirs | `PATH` for the job. |
 | `services.callisto.startInterval` | `900` | Seconds between launchd runs (macOS). |
 | `services.callisto.onCalendar` | `"*:0/15"` | systemd timer schedule (Linux). |
@@ -401,12 +414,13 @@ log every run.
 Set `databases` through the module. Once `vault` or `databases` is
 set, home-manager owns `config.toml`. `sync --all` fails without
 databases or a vault, so every switch warns while `databases` is empty
-or `vault` is unset. `unfiled` alone does not make home-manager own
-the file; a switch warns that it has no effect.
+or `vault` is unset. `unfiled` and `locations` alone do not make
+home-manager own the file; a switch warns that they have no effect.
 
 The module checks what it can before a switch: every `beads_dir` is
-anchored, no entry sets both `project` and `split`, and `split.by` has
-no empty segment.
+anchored, no entry sets both `project` and `split`, `split.by` has no
+empty segment, `unfiled` is a relative path inside the vault, and
+`locations` follows the rules above.
 
 A hand-written `config.toml` is discouraged. With `vault` and
 `databases` both unset, the module leaves the file alone and the job

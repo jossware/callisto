@@ -15,7 +15,7 @@ use callisto::config::{Filing, Split};
 use callisto::database::Database;
 use callisto::errlog::Stage;
 use callisto::lock;
-use callisto::project::Source;
+use callisto::project::{DEFAULT_LOCATIONS, Source};
 use callisto::standing::Condition;
 use callisto::sync::{self, Report, Request, Scope, Warning};
 use callisto::vault::Index;
@@ -41,6 +41,7 @@ struct Fixture {
     database: Database,
     bd: Bd,
     prefix: String,
+    locations: Vec<PathBuf>,
 }
 
 /// A vault holding project `name`, and a checkout named `name` whose
@@ -58,6 +59,7 @@ fn fixture(prefix: &str, name: &str) -> Fixture {
         vault,
         tmp,
         prefix: prefix.into(),
+        locations: DEFAULT_LOCATIONS.iter().map(PathBuf::from).collect(),
     }
 }
 
@@ -163,6 +165,7 @@ impl Fixture {
                 scope,
                 tz: &tz,
                 unfiled: Path::new("Inbox"),
+                locations: &self.locations,
             },
         )
     }
@@ -472,7 +475,7 @@ fn export_failure_writes_nothing() {
 #[test]
 fn unmapped_repo_is_skipped() {
     let f = fixture("a", "a");
-    fs::remove_file(f.vault.join("Projects/a/a.md")).unwrap();
+    fs::remove_dir_all(f.vault.join("Projects/a")).unwrap();
     f.set_export(&[line("a-1", "first", "open")]);
     let report = f.run().unwrap();
     assert!(
@@ -1250,4 +1253,28 @@ fn index_is_not_a_bead_note() {
         "{:?}",
         index.notes()
     );
+}
+
+#[test]
+fn configured_locations_map_the_database() {
+    let mut f = fixture("a", "a");
+    fs::create_dir_all(f.vault.join("Work/a")).unwrap();
+    f.locations = paths(&["Work"]);
+    f.set_export(&[line("a-1", "first", "open")]);
+    let report = f.run().unwrap();
+    assert_eq!(report.created, paths(&["Work/a/first - a-1.md"]));
+}
+
+#[test]
+fn configured_locations_file_split_beads() {
+    let mut f = split();
+    fs::create_dir_all(f.vault.join("Work/A")).unwrap();
+    f.locations = paths(&["Work"]);
+    f.set_export(&[
+        field_line("zz-1", "one", "open", REPO_A),
+        field_line("zz-2", "two", "open", Some(r#"{"repo":"o/b"}"#)),
+    ]);
+    let report = f.run_split(A_AND_B).unwrap();
+    assert_eq!(report.created, paths(&["Work/A/one - zz-1.md", INDEX]));
+    assert_eq!(report.unfiled[0].reason, Reason::MissingProject("B".into()));
 }

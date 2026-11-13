@@ -11,6 +11,7 @@ const OPTIONS: &[&str] = &[
     "vault",
     "databases",
     "unfiled",
+    "locations",
     "path",
     "startInterval",
     "onCalendar",

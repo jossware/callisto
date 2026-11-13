@@ -128,6 +128,7 @@ pub fn run(vault: Option<&Path>, env: &Env, bd: &Bd, stdin: &mut dyn Read, err: 
             scope: &scope,
             tz: &TimeZone::system(),
             unfiled: &config.unfiled,
+            locations: &config.locations,
         };
         // Warnings are dropped: they recur every turn, and `sync` shows them.
         match sync::sync_database(&lock, &req) {

@@ -25,11 +25,22 @@ let
     message = "services.callisto.${option}: ${label} ${f} MUST be a dotted path with no empty segments";
   };
 
-  unfiledAssertion = u: {
+  relativeAssertion = option: u: {
     assertion =
       !(lib.hasPrefix "/" u)
       && !(builtins.any (s: builtins.elem s [ "" "." ".." ]) (lib.splitString "/" u));
-    message = "services.callisto.unfiled: ${u} MUST be a relative path inside the vault, with no empty, `.` or `..` segments";
+    message = "services.callisto.${option}: ${u} MUST be a relative path inside the vault, with no empty, `.` or `..` segments";
+  };
+
+  # Mirrors the loader: the vault scan skips dot-prefixed entries.
+  visibleAssertion = option: u: {
+    assertion = !(builtins.any (lib.hasPrefix ".") (lib.splitString "/" u));
+    message = "services.callisto.${option}: ${u} MUST NOT have a segment starting with `.`";
+  };
+
+  distinctAssertion = option: xs: {
+    assertion = lib.unique xs == xs;
+    message = "services.callisto.${option} MUST NOT list an entry twice";
   };
 
   databaseAssertions =
@@ -164,6 +175,23 @@ in
       '';
     };
 
+    locations = lib.mkOption {
+      type = lib.types.nullOr (lib.types.nonEmptyListOf lib.types.str);
+      default = null;
+      example = [
+        "Projects"
+        "Archives/Projects"
+      ];
+      description = ''
+        Vault-relative folders searched, in order, for a project's
+        folder. The first `<location>/<Name>` directory wins. The list
+        replaces callisto's default of `Projects`, `Areas`,
+        `Archives/Projects` and `Archives/Areas`. Each entry MUST be
+        relative, with no empty, `.` or `..` segments and no segment
+        starting with `.`. No entry may repeat.
+      '';
+    };
+
     path = lib.mkOption {
       type = lib.types.listOf lib.types.str;
       default = [
@@ -205,15 +233,23 @@ in
         assertions =
           lib.optional (cfg.vault != null) (entryAssertion "vault" cfg.vault)
           ++ lib.concatMap databaseAssertions cfg.databases
-          ++ lib.optional (cfg.unfiled != null) (unfiledAssertion cfg.unfiled);
+          ++ lib.optional (cfg.unfiled != null) (relativeAssertion "unfiled" cfg.unfiled)
+          ++ lib.optionals (cfg.locations != null) (
+            map (relativeAssertion "locations") cfg.locations
+            ++ map (visibleAssertion "locations") cfg.locations
+            ++ [ (distinctAssertion "locations" cfg.locations) ]
+          );
 
         # sync --all fails without a vault or with an empty database list,
         # so the job would log an error every run. A config.toml
         # home-manager does not manage may still supply either, hence
         # warnings and not assertions.
         warnings =
-          lib.optional (!generates && cfg.unfiled != null)
-            "services.callisto.unfiled is set, but neither vault nor databases is, so config.toml is not generated and it has no effect."
+          lib.optionals (!generates) (
+            map
+              (name: "services.callisto.${name} is set, but neither vault nor databases is, so config.toml is not generated and it has no effect.")
+              (lib.filter (name: cfg.${name} != null) [ "unfiled" "locations" ])
+          )
           ++ (if cfg.databases != [ ] then
             lib.optional (cfg.vault == null)
               "services.callisto.vault is unset, so every scheduled `callisto sync --all` fails. Set services.callisto.vault."
@@ -228,7 +264,7 @@ in
         xdg.configFile."callisto/config.toml" = lib.mkIf generates {
           source = (pkgs.formats.toml { }).generate "callisto-config.toml" (
             lib.filterAttrs (_: v: v != null) {
-              inherit (cfg) vault unfiled;
+              inherit (cfg) vault unfiled locations;
               databases = map renderDatabase cfg.databases;
             }
           );

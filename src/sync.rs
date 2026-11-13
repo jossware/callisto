@@ -48,6 +48,8 @@ pub struct Request<'a> {
     /// Vault-relative folder for a split database's index of unfiled
     /// beads.
     pub unfiled: &'a Path,
+    /// Vault-relative folders a project may live in, in lookup order.
+    pub locations: &'a [PathBuf],
 }
 
 /// Paths are relative to the vault, in the order they were written.
@@ -230,11 +232,13 @@ pub fn sync_database(_lock: &Lock, req: &Request) -> Result<Report, Error> {
             // A configured project is final, like the bd setting: falling
             // back would hide a typo in it.
             let mapped = match project {
-                Some(name) => project::find(req.vault, name).ok_or_else(|| Unmapped {
-                    name: name.clone(),
-                    source: Source::Config,
-                }),
-                None => project::map(req.vault, &database.name, &settings),
+                Some(name) => {
+                    project::find(req.vault, req.locations, name).ok_or_else(|| Unmapped {
+                        name: name.clone(),
+                        source: Source::Config,
+                    })
+                }
+                None => project::map(req.vault, req.locations, &database.name, &settings),
             };
             match mapped {
                 Ok(project) => Filer::Single(project),
@@ -312,7 +316,7 @@ pub fn sync_database(_lock: &Lock, req: &Request) -> Result<Report, Error> {
             }
             Generated::Missing => {
                 let rel = project
-                    .folder()
+                    .folder
                     .join(filename::filename(&bead.title, &bead.id));
                 match write::create(&req.vault.join(&rel), &text) {
                     Ok(()) => report.created.push(rel),
@@ -428,7 +432,13 @@ fn file_split(
     fields: &HashMap<String, FieldValue>,
     report: &mut Report,
 ) -> HashMap<String, Project> {
-    let partition = claim::partition_split(req.vault, graph.notes(), fields, &split.projects);
+    let partition = claim::partition_split(
+        req.vault,
+        req.locations,
+        graph.notes(),
+        fields,
+        &split.projects,
+    );
     report
         .conditions
         .extend(claim::conditions(&partition.unfiled));
@@ -446,7 +456,7 @@ fn hidden(vault: &Path, filing: &Filing, graph: &Graph, index: &Index) -> HashSe
         .filter(|b| index.generated(&b.id) == Generated::Missing)
         .filter(|b| match filing.project(&b.id) {
             Some(project) => {
-                let rel = project.folder().join(filename::filename(&b.title, &b.id));
+                let rel = project.folder.join(filename::filename(&b.title, &b.id));
                 fs::symlink_metadata(vault.join(rel)).is_ok()
             }
             None => true,

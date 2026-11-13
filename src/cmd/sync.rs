@@ -174,6 +174,7 @@ fn sync(args: &Args, env: &Env, bd: &Bd, cwd: &Path, state: &Path, out: &mut Out
             scope: &scope,
             tz: &tz,
             unfiled: &config.unfiled,
+            locations: &config.locations,
         };
         match sync::sync_database(&lock, &req) {
             Ok(report) => {
