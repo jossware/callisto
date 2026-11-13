@@ -28,6 +28,7 @@ fn module_config_loads() {
             vault: Some(PathBuf::from("/h/org")),
             field: Some("metadata.repo".to_string()),
             unfiled: PathBuf::from("Inbox/Beads"),
+            databases: vec![],
             repos: vec![
                 RepoEntry::Path(PathBuf::from("/h/Workspaces/callisto")),
                 table(
@@ -46,6 +47,7 @@ fn module_config_loads() {
             vault: Some(PathBuf::from("/h/org")),
             field: Some("metadata.repo".to_string()),
             unfiled: PathBuf::from("Inbox"),
+            databases: vec![],
             repos: vec![
                 table("/srv/q", "x.y", Some(&["a", "b"]), None),
                 table("/srv/r", "metadata.repo", None, None),
