@@ -159,7 +159,8 @@ in
         Vault-relative folder for each split database's index of
         unfiled beads, `Unfiled beads - <prefix>.md`. Unfiled beads get
         no note of their own. callisto never creates the folder, and a
-        sync fails if it is missing. callisto defaults it to `Inbox`.
+        sync of a split database fails if it is missing. callisto
+        defaults it to `Inbox`.
       '';
     };
 

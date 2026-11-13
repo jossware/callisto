@@ -60,7 +60,7 @@ The flake builds for `aarch64-darwin`, `aarch64-linux` and
 other system, build callisto yourself and set
 `services.callisto.package`.
 
-callisto runs `bd` (1.3.1 or later) for all beads access. `bd` MUST be on
+callisto runs `bd` (1.3.4 or later) for all beads access. `bd` MUST be on
 `PATH` wherever callisto runs.
 
 ## Configuration
