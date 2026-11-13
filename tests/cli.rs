@@ -1173,3 +1173,186 @@ fn single_project_config_writes_no_index() {
     assert_eq!(out.code, Some(0), "{}", out.stderr);
     assert_eq!(fs::read_dir(sb.vault().join("Inbox")).unwrap().count(), 0);
 }
+
+impl Sandbox {
+    /// `args` from `cwd` with `envs` added to the child's environment.
+    fn run_env(&self, cwd: &Path, args: &[&str], envs: &[(&str, &str)]) -> Run {
+        let mut cmd = self.command(cwd, args);
+        cmd.envs(envs.iter().copied());
+        cmd.output().unwrap().into()
+    }
+
+    /// A bare directory `repos/<name>` with no `.beads`.
+    fn bare(&self, name: &str) -> PathBuf {
+        let dir = self.path("repos").join(name);
+        fs::create_dir_all(dir.join(".git")).unwrap();
+        dir
+    }
+}
+
+fn env_dir(path: &Path) -> String {
+    path.display().to_string()
+}
+
+#[test]
+fn all_syncs_a_split_database_without_a_checkout() {
+    let sb = Sandbox::new();
+    let db = rollout(&sb);
+    sb.config_text(&format!(
+        "[[databases]]\nbeads_dir = {}\nsplit.by = \"metadata.repo\"\n\
+         split.projects = {{ \"github.com/o/api\" = \"API\" }}\n",
+        toml_str(&db)
+    ));
+    let export: String = [
+        meta_line("w-1", "first", Some("github.com/o/api")),
+        meta_line("w-2", "second", Some("github.com/o/web")),
+        meta_line("w-3", "third", None),
+    ]
+    .iter()
+    .map(|l| format!("{l}\n"))
+    .collect();
+    fs::write(db.join("export.jsonl"), export).unwrap();
+    sb.project("API");
+    sb.project("web");
+    let out = sb.run(&sb.path("home"), &["sync", "--all"]);
+    assert_eq!(out.code, Some(0), "{}", out.stderr);
+    assert!(sb.note("Projects/API/first - w-1.md"), "{}", out.stderr);
+    assert!(sb.note("Projects/web/second - w-2.md"), "{}", out.stderr);
+    let index = fs::read_to_string(sb.vault().join("Inbox/Unfiled beads - w.md")).unwrap();
+    assert!(index.contains("| w-3 | third |"), "{index}");
+}
+
+#[test]
+fn stray_beads_env_does_not_change_a_configured_sync() {
+    let sb = Sandbox::new();
+    sb.repo("a", "a", &[("a-1", "first")]);
+    let other = sb.repo("other", "o", &[("o-1", "stray")]);
+    sb.config(&["a"]);
+    let other_db = env_dir(&other.join(".beads"));
+    let envs = [("BEADS_DIR", other_db.as_str()), ("BEADS_DB", "/nowhere")];
+    let first = sb.run_env(&sb.path("home"), &["sync", "--all"], &envs);
+    assert_eq!(first.code, Some(0), "{}", first.stderr);
+    assert!(sb.note("Projects/a/first - a-1.md"));
+    assert!(!sb.note("Projects/other/stray - o-1.md"));
+    let again = sb.run_env(&sb.path("home"), &["sync", "--all"], &envs);
+    assert_eq!(again.code, Some(0), "{}", again.stderr);
+    assert_eq!(
+        again.stdout,
+        "a: 0 created, 0 updated, 0 removed, 1 unchanged\n"
+    );
+    assert!(sb.calls("other").is_none());
+}
+
+#[test]
+fn hook_in_beadless_checkout_syncs_the_beads_dir_database() {
+    let sb = Sandbox::new();
+    sb.repo("a", "a", &[("a-1", "first")]);
+    let bare = sb.bare("bare");
+    sb.config(&["a"]);
+    let db = env_dir(&sb.path("repos/a/.beads"));
+    let out = sb.hook(&payload(&bare), &[], &[("BEADS_DIR", db.as_str())]);
+    assert_quiet_exit(&out);
+    assert!(sb.note("Projects/a/first - a-1.md"), "{:?}", sb.log());
+    assert!(sb.log().is_empty(), "{:?}", sb.log());
+}
+
+#[test]
+fn hook_prefers_beads_dir_over_a_stray_local_beads() {
+    let sb = Sandbox::new();
+    sb.repo("a", "a", &[("a-1", "first")]);
+    let stray = sb.repo("stray", "s", &[("s-1", "local")]);
+    sb.config(&["a"]);
+    let db = env_dir(&sb.path("repos/a/.beads"));
+    let out = sb.hook(&payload(&stray), &[], &[("BEADS_DIR", db.as_str())]);
+    assert_quiet_exit(&out);
+    assert!(sb.note("Projects/a/first - a-1.md"), "{:?}", sb.log());
+    assert!(!sb.note("Projects/stray/local - s-1.md"));
+    assert!(sb.log().is_empty(), "{:?}", sb.log());
+}
+
+#[test]
+fn hook_skips_an_unconfigured_beads_dir_silently() {
+    let sb = Sandbox::new();
+    sb.repo("a", "a", &[("a-1", "first")]);
+    let un = sb.repo("un", "u", &[("u-1", "loose")]);
+    let bare = sb.bare("bare");
+    sb.config(&["a"]);
+    let db = env_dir(&un.join(".beads"));
+    let out = sb.hook(&payload(&bare), &[], &[("BEADS_DIR", db.as_str())]);
+    assert_quiet_exit(&out);
+    assert_eq!(out.stderr, "");
+    assert!(!sb.note("Projects/un/loose - u-1.md"));
+    assert!(!sb.note("Projects/a/first - a-1.md"));
+    assert!(sb.log().is_empty(), "{:?}", sb.log());
+}
+
+#[test]
+fn sync_fails_an_unconfigured_beads_dir() {
+    let sb = Sandbox::new();
+    sb.repo("a", "a", &[("a-1", "first")]);
+    let un = sb.repo("un", "u", &[("u-1", "loose")]);
+    let bare = sb.bare("bare");
+    sb.config(&["a"]);
+    let db = env_dir(&un.join(".beads"));
+    let out = sb.run_env(&bare, &["sync"], &[("BEADS_DIR", db.as_str())]);
+    assert_eq!(out.code, Some(1), "{}", out.stderr);
+    assert!(out.stderr.contains("is not configured"), "{}", out.stderr);
+    assert!(!sb.note("Projects/un/loose - u-1.md"));
+}
+
+#[test]
+fn hook_without_beads_or_beads_dir_runs_no_bd() {
+    let sb = Sandbox::new();
+    sb.repo("a", "a", &[("a-1", "first")]);
+    let bare = sb.bare("bare");
+    sb.config(&["a"]);
+    let out = sb.hook(&payload(&bare), &[], &[]);
+    assert_quiet_exit(&out);
+    assert!(sb.calls("a").is_none());
+    assert!(sb.log().is_empty(), "{:?}", sb.log());
+    assert!(!sb.note("Projects/a/first - a-1.md"));
+}
+
+#[test]
+fn shared_prefix_blocks_removal_and_fails_sync() {
+    let sb = Sandbox::new();
+    sb.repo("a", "p", &[("p-1", "first")]);
+    sb.repo("b", "p", &[("p-2", "second")]);
+    sb.config(&["a"]);
+    let seeded = sb.run(&sb.path("home"), &["sync", "--all"]);
+    assert_eq!(seeded.code, Some(0), "{}", seeded.stderr);
+    let note = sb.vault().join("Projects/a/first - p-1.md");
+    let before = fs::read_to_string(&note).unwrap();
+    fs::write(sb.path("repos/a/.beads/export.jsonl"), "").unwrap();
+    sb.config(&["a", "b"]);
+    let out = sb.run(&sb.path("home"), &["sync", "--all"]);
+    assert_ne!(out.code, Some(0), "{}", out.stderr);
+    assert!(!out.stdout.contains(" 1 removed"), "{}", out.stdout);
+    assert_eq!(fs::read_to_string(&note).unwrap(), before);
+}
+
+#[test]
+fn missing_database_dir_fails_only_that_database() {
+    let sb = Sandbox::new();
+    sb.repo("a", "a", &[("a-1", "first")]);
+    sb.config_text(&format!(
+        "[[databases]]\nbeads_dir = {}\n[[databases]]\nbeads_dir = {}\n",
+        sb.toml_db("a"),
+        toml_str(&sb.path("repos/gone/.beads"))
+    ));
+    let out = sb.run(&sb.path("home"), &["sync", "--all"]);
+    assert_eq!(out.code, Some(1), "{}", out.stderr);
+    assert!(sb.note("Projects/a/first - a-1.md"), "{}", out.stderr);
+    assert!(out.stderr.contains("gone"), "{}", out.stderr);
+}
+
+#[test]
+fn hook_syncs_a_single_project_home_database() {
+    let sb = Sandbox::new();
+    let repo = sb.repo("a", "a", &[("a-1", "first")]);
+    sb.config(&["a"]);
+    let out = sb.hook(&payload(&repo.join("sub")), &[], &[]);
+    assert_quiet_exit(&out);
+    assert!(sb.note("Projects/a/first - a-1.md"), "{:?}", sb.log());
+    assert!(sb.log().is_empty(), "{:?}", sb.log());
+}
